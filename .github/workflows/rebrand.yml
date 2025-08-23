@@ -1,6 +1,6 @@
 - name: Download base APK from release
-  run: |
-    curl -L -o base.apk https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk
+        run: |
+          curl -L -o base.apk https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk
 on:
   workflow_dispatch:
 
