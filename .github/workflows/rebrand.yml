@@ -1,0 +1,66 @@
+name: Rebrand QGroundControl to Aeronics GCS (APK)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rebrand:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Download apktool & uber-apk-signer
+        run: |
+          curl -L -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
+          curl -L -o apktool https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
+          chmod +x apktool
+          curl -L -o uber-apk-signer.jar https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar
+
+      - name: Download official QGroundControl APK
+        run: |
+          curl -L -o base.apk https://github.com/mavlink/qgroundcontrol/releases/download/v4.4.0/QGroundControl-Android-v4.4.0.apk
+
+      - name: Decode APK
+        run: |
+          ./apktool d base.apk -o work -f
+
+      - name: Rename app to "Aeronics GCS"
+        run: |
+          if grep -Rql 'name="app_name"' work/res/values*; then
+            sed -i 's#<string name="app_name">[^<]*</string>#<string name="app_name">Aeronics GCS</string>#g' work/res/values*/strings.xml || true
+          fi
+
+      - name: Replace launcher icons
+        run: |
+          for d in mipmap-hdpi mipmap-mdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
+            mkdir -p work/res/$d
+            cp branding/icon.png work/res/$d/ic_launcher.png || true
+            cp branding/icon.png work/res/$d/ic_launcher_round.png || true
+          done
+
+      - name: Try to replace splash logo (best-effort)
+        run: |
+          find work/res -type f -iname "splash*.png" -exec cp branding/icon.png {} \; || true
+
+      - name: Rebuild unsigned APK
+        run: |
+          ./apktool b work -o unsigned.apk
+
+      - name: Sign & align APK (debug key auto-generated)
+        run: |
+          mkdir -p output
+          java -jar uber-apk-signer.jar -a unsigned.apk -o output
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aeronics-GCS-APK
+          path: output/*.apk
