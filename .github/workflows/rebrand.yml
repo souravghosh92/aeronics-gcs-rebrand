@@ -1,6 +1,5 @@
-- name: Download base APK from release
-        run: |
-          curl -L -o base.apk https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk
+name: Rebrand QGroundControl to Aeronics GCS (APK)
+
 on:
   workflow_dispatch:
 
@@ -25,12 +24,13 @@ jobs:
           chmod +x apktool
           curl -L -o uber-apk-signer.jar https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar
 
-      - name: Download official QGroundControl APK
+      - name: Download base APK from release
         run: |
-          curl -L -o base.apk https://github.com/mavlink/qgroundcontrol/releases/download/v4.4.0/QGroundControl-Android-v4.4.0.apk
+          curl -L -o base.apk https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk
 
       - name: Decode APK
         run: |
+          rm -rf work
           ./apktool d base.apk -o work -f
 
       - name: Rename app to "Aeronics GCS"
