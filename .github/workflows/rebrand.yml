@@ -1,5 +1,6 @@
-name: Rebrand QGroundControl to Aeronics GCS (APK)
-
+- name: Download base APK from release
+  run: |
+    curl -L -o base.apk https://github.com/<your-username>/aeronics-gcs-rebrand/releases/download/v0.0.1/base.apk
 on:
   workflow_dispatch:
 
