@@ -6,168 +6,65 @@ on:
 jobs:
   rebrand:
     runs-on: ubuntu-latest
-
-    # -------- Global config you can tweak --------
     env:
-      WORKDIR: ${{ github.workspace }}
-      # Where we will install the Android SDK
       ANDROID_HOME: ${{ github.workspace }}/android-sdk
-      # Ensure the Android tools are on PATH for *every* step
       PATH: ${{ github.workspace }}/android-sdk/cmdline-tools/latest/bin:${{ github.workspace }}/android-sdk/platform-tools:${{ github.workspace }}/android-sdk/build-tools/34.0.0:${{ env.PATH }}
-      # Build target (just needs to be >= APK minSdk of QGC)
-      ANDROID_API: "31"
-
-      # ---- Your inputs in repo ----
-      # (Commit your ZIP of the original QGC APK as: branding/base.apk)
       BASE_APK: branding/base.apk
-      # Launcher icon + (optional) splash image you provided
       ICON: custom/res/images/aeronics_icon.png
-      SPLASH: custom/res/images/splash.png
-
-      # Visible app name
       APP_NAME: "Aeronics GCS"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          lfs: true  # if you added large files with Git LFS
 
-      - name: Install system deps (JDK, tools)
+      - name: Install system deps
         run: |
-          set -eux
           sudo apt-get update
-          # JDK 17 + misc tools we need
-          sudo apt-get install -y openjdk-17-jdk unzip zipalign apksigner imagemagick curl jq
+          sudo apt-get install -y openjdk-17-jdk unzip zipalign apksigner imagemagick curl
 
-      - name: Install Android SDK & NDK
+      - name: Install Android SDK
         run: |
-          set -eux
           mkdir -p "$ANDROID_HOME/cmdline-tools"
           cd "$ANDROID_HOME/cmdline-tools"
-
-          # Android cmdline-tools
           curl -L -o tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
           unzip -q tools.zip -d latest
-          rm -f tools.zip
-
-          # sdkmanager now on PATH (also exported globally via env.PATH)
           yes | sdkmanager --licenses
-
-          # Core packages
-          sdkmanager --install \
-            "platforms;android-${ANDROID_API}" \
-            "build-tools;34.0.0" \
-            "platform-tools" \
-            "ndk;26.1.10909125"
-
-          # Show what we got (debug)
-          sdkmanager --list | head -n 200 || true
-          which zipalign || true
-          which apksigner || true
+          sdkmanager --install "platforms;android-31" "build-tools;34.0.0" "platform-tools"
 
       - name: Download apktool
         run: |
-          set -eux
-          APKTOOL_VER=2.9.3
           curl -L -o /usr/local/bin/apktool https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
-          curl -L -o /usr/local/bin/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VER}/apktool_${APKTOOL_VER}.jar
+          curl -L -o /usr/local/bin/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
           chmod +x /usr/local/bin/apktool
-          apktool --version
 
-      - name: Check required inputs exist
+      - name: Check required assets
         run: |
-          set -eux
           test -f "$BASE_APK" || (echo "Missing $BASE_APK"; exit 1)
           test -f "$ICON" || (echo "Missing icon at $ICON"; exit 1)
-          echo "Inputs OK."
 
       - name: Decode base APK
+        run: apktool d -f -o decoded "$BASE_APK"
+
+      - name: Apply branding
         run: |
-          set -eux
-          rm -rf decoded
-          apktool d -f -o decoded "$BASE_APK"
-          ls -la decoded | head -n 200
-
-      - name: Apply Aeronics branding (icon + label)
-        run: |
-          set -eux
-
-          # 1) App label → Aeronics GCS
-          #    (handles either application-label or android:label)
-          if grep -q 'application-label' decoded/AndroidManifest.xml; then
-            sed -i 's/application-label="[^"]*"/application-label="'${APP_NAME//\//\\/}'"/' decoded/AndroidManifest.xml
-          fi
-          sed -i 's/android:label="[^"]*"/android:label="'${APP_NAME//\//\\/}'"/' decoded/AndroidManifest.xml || true
-
-          # 2) Force launcher icon names to @mipmap/ic_launcher / ic_launcher_round
+          sed -i 's/android:label="[^"]*"/android:label="'${APP_NAME}'"/' decoded/AndroidManifest.xml || true
           sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' decoded/AndroidManifest.xml || true
-          sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' decoded/AndroidManifest.xml || true
-
-          # 3) Put your icon into drawable-nodpi and reference it via adaptive icons
-          mkdir -p decoded/res/mipmap-anydpi-v26 decoded/res/drawable-nodpi
+          mkdir -p decoded/res/drawable-nodpi
           cp "$ICON" decoded/res/drawable-nodpi/aeronics_icon.png
 
-          cat > decoded/res/mipmap-anydpi-v26/ic_launcher.xml <<'XML'
-<?xml version="1.0" encoding="utf-8"?>
-<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-  <background android:drawable="@android:color/transparent"/>
-  <foreground>
-    <bitmap android:src="@drawable/aeronics_icon" android:gravity="center"/>
-  </foreground>
-</adaptive-icon>
-XML
-
-          cp decoded/res/mipmap-anydpi-v26/ic_launcher.xml decoded/res/mipmap-anydpi-v26/ic_launcher_round.xml
-
-          # 4) Best-effort: replace common in-app Q logo drawables if they exist
-          for p in decoded/res/drawable*; do
-            if [ -d "$p" ]; then
-              cp "$ICON" "$p/qgc_logo.png" 2>/dev/null || true
-              cp "$ICON" "$p/logo.png" 2>/dev/null || true
-              cp "$ICON" "$p/ic_qgc.png" 2>/dev/null || true
-            fi
-          done
-
-          # Optional: splash if you provided one
-          if [ -f "$SPLASH" ]; then
-            mkdir -p decoded/res/drawable-nodpi
-            cp "$SPLASH" decoded/res/drawable-nodpi/aeronics_splash.png
-          fi
-
       - name: Rebuild APK
-        run: |
-          set -eux
-          rm -f unsigned.apk
-          apktool b decoded -o unsigned.apk
-          ls -lh unsigned.apk
+        run: apktool b decoded -o unsigned.apk
 
       - name: Zipalign
-        run: |
-          set -eux
-          rm -f aligned.apk
-          zipalign -v -p 4 unsigned.apk aligned.apk
-          ls -lh aligned.apk
-
-      - name: Create debug keystore (if missing)
-        run: |
-          set -eux
-          if [ ! -f debug.keystore ]; then
-            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Aer, OU=Dev, O=Aer, L=City, S=State, C=US"
-          fi
-          ls -lh debug.keystore
+        run: zipalign -v -p 4 unsigned.apk aligned.apk
 
       - name: Sign APK
         run: |
-          set -eux
-          rm -f Aeronics-GCS.apk
+          keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Aer, OU=Dev, O=Aer, L=City, S=State, C=US"
           apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out Aeronics-GCS.apk aligned.apk
-          apksigner verify -v Aeronics-GCS.apk || true
-          ls -lh Aeronics-GCS.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: Aeronics-GCS-APK
           path: Aeronics-GCS.apk
-          if-no-files-found: error
