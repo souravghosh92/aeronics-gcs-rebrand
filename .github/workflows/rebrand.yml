@@ -17,76 +17,54 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install tools (apktool, uber-apk-signer)
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip zip openjdk-17-jdk
+
+      - name: Download apktool & uber-apk-signer
         run: |
           curl -L -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
           curl -L -o apktool https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
           chmod +x apktool
-          sudo mv apktool apktool.jar /usr/local/bin/
           curl -L -o uber-apk-signer.jar https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar
 
-      - name: Download base APK
+      - name: Download base QGroundControl APK
         run: |
           curl -L -o base.apk https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk
 
       - name: Decode APK
         run: |
-          java -jar /usr/local/bin/apktool.jar d base.apk -o decoded-apk --force
+          java -jar apktool.jar d base.apk -o decoded-apk --force
 
-      - name: Apply branding images
+      - name: Apply Aeronics Branding
         run: |
-          set -e
-          mkdir -p branding
+          # Replace icons & logos
+          cp custom/res/images/aeronics_icon.png decoded-apk/res/mipmap-xxhdpi-v4/ic_launcher.png
+          cp custom/res/images/aeronics_icon.png decoded-apk/res/mipmap-xxxhdpi-v4/ic_launcher.png
+          cp custom/res/images/aeronics_logo.png decoded-apk/res/drawable/logo.png
+          cp custom/res/images/splash.png decoded-apk/res/drawable/splash.png
 
-          # Launcher icon (required)
-          if [ -f icon.png ]; then
-            cp -f icon.png branding/icon.png
-          else
-            echo "❌ icon.png missing!"
-            exit 1
-          fi
+          # Add qrc and plugin
+          mkdir -p decoded-apk/custom
+          cp qgc_custom.qrc decoded-apk/custom/qgc_custom.qrc
+          cp CustomPlugin.cc decoded-apk/custom/CustomPlugin.cc
 
-          # In-app logo (fallback to icon if not provided)
-          if [ -f LogoDark.png ]; then
-            cp -f LogoDark.png branding/inapp.png
-          elif [ -f LogoLight.png ]; then
-            cp -f LogoLight.png branding/inapp.png
-          else
-            cp -f branding/icon.png branding/inapp.png
-          fi
-
-          # Replace launcher icons
-          cp -f branding/icon.png decoded-apk/res/mipmap-xxhdpi-v4/ic_launcher.png || true
-          cp -f branding/icon.png decoded-apk/res/mipmap-xhdpi-v4/ic_launcher.png || true
-          cp -f branding/icon.png decoded-apk/res/mipmap-hdpi-v4/ic_launcher.png || true
-
-          # Replace all Q logos inside the app
-          for img in ic_qgc_logo.png qgc_icon.png qgc_logo.png qgc_logo_full.png; do
-            find decoded-apk/res/ -type f -name "$img" -exec cp -f branding/inapp.png {} \; || true
-          done
-
-      - name: Update app name (strings.xml)
-        run: |
-          sed -i 's/QGroundControl/Aeronics GCS/g' decoded-apk/res/values/strings.xml || true
-          sed -i 's/QGroundControl/Aeronics GCS/g' decoded-apk/res/values*/strings.xml || true
+          # Replace text branding
+          find decoded-apk -type f -name "*.xml" -exec sed -i 's/QGroundControl/Aeronics GCS/g' {} +
+          find decoded-apk -type f -name "*.smali" -exec sed -i 's/QGroundControl/Aeronics GCS/g' {} +
 
       - name: Rebuild APK
         run: |
-          java -jar /usr/local/bin/apktool.jar b decoded-apk -o unsigned.apk
+          java -jar apktool.jar b decoded-apk -o Aeronics-GCS-unsigned.apk
 
       - name: Sign APK
         run: |
-          java -jar uber-apk-signer.jar --apks unsigned.apk
-          mv unsigned-aligned-debugSigned.apk Aeronics-GCS.apk
+          java -jar uber-apk-signer.jar --apks Aeronics-GCS-unsigned.apk
+          mv Aeronics-GCS-unsigned-aligned-debugSigned.apk Aeronics-GCS.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Aeronics-GCS-APK
           path: Aeronics-GCS.apk
-
-      - name: Upload decoded resources (diagnosis)
-        uses: actions/upload-artifact@v4
-        with:
-          name: diagnosis
-          path: decoded-apk
