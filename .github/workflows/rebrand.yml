@@ -1,5 +1,4 @@
 name: Rebrand QGroundControl to Aeronics GCS
-
 on:
   workflow_dispatch:
 
@@ -11,7 +10,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install build tools
         run: |
           sudo apt-get update
           sudo apt-get install -y default-jdk imagemagick zipalign aapt libimage-exiftool-perl
@@ -20,38 +19,71 @@ jobs:
           chmod +x apktool
           curl -L -o uber-apk-signer.jar https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar
 
-      - name: Download Base APK
-        run: curl -L "https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk" -o base.apk
-
-      - name: Decode APK
-        run: java -jar apktool.jar d -f -o decoded-apk base.apk
-
-      - name: Replace branding
+      - name: Download base QGC APK
         run: |
-          # Change app name
-          sed -i 's/QGroundControl/Aeronics GCS/g' decoded-apk/AndroidManifest.xml || true
-          find decoded-apk/res -type f -name "*.xml" -exec sed -i 's/QGroundControl/Aeronics GCS/g' {} +
-          find decoded-apk/res -type f -name "*.xml" -exec sed -i 's/QGC/Aeronics GCS/g' {} +
+          # put your source APK URL here (or store it as a repo asset)
+          curl -L "https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk" -o base.apk
 
-          # Replace icons
-          for d in decoded-apk/res/mipmap-*; do
-            cp custom/res/images/aeronics_icon.png "$d/ic_launcher.png" || true
-            cp custom/res/images/aeronics_icon.png "$d/ic_launcher_round.png" || true
+      - name: Decode APK with apktool
+        run: |
+          java -jar apktool.jar d -f -o decoded-apk base.apk
+
+      - name: Apply Aeronics branding
+        run: |
+          set -e
+
+          # 1) App/display names
+          # Prefer strings.xml; also do a safe fall-back replace in XML files.
+          if grep -q 'name="app_name"' decoded-apk/res/values/strings.xml; then
+            sed -i 's#<string name="app_name">[^<]*</string>#<string name="app_name">Aeronics GCS</string>#' decoded-apk/res/values/strings.xml
+          fi
+          find decoded-apk/res -type f -name '*.xml' -exec sed -i 's/QGroundControl/Aeronics GCS/g' {} +
+          find decoded-apk/res -type f -name '*.xml' -exec sed -i 's/\bQGC\b/Aeronics GCS/g' {} +
+
+          # 2) Replace obvious in-app logos (filenames vary between versions)
+          # common names we’ve seen in QGC packages:
+          for n in qgc_logo qgc_app_logo qgc_brand_logo qgc_logo_white logo; do
+            find decoded-apk/res -type f -regex ".*\(drawable\|mipmap\).*${n}.*\.png" -exec cp custom/res/images/aeronics_logo.png {} \; || true
           done
+          # optional splash replacements
+          find decoded-apk/res -type f -regex '.*\(splash\|startup\).*\.png' -exec cp custom/res/images/splash.png {} \; || true
 
-          # Replace splash/logo if present
-          find decoded-apk -type f -iname "*splash*.png" -exec cp custom/res/images/splash.png {} \; || true
-          find decoded-apk -type f -iname "*logo*.png" -exec cp custom/res/images/aeronics_logo.png {} \; || true
+          # 3) Adaptive launcher icon (this is why your launcher icon didn’t change)
+          # Put our icon into drawable-nodpi so the XML can point to it.
+          mkdir -p decoded-apk/res/drawable-nodpi
+          cp custom/res/images/aeronics_icon.png decoded-apk/res/drawable-nodpi/aeronics_icon.png
 
-      - name: Rebuild APK
-        run: java -jar apktool.jar b decoded-apk -o unsigned.apk
+          # Overwrite adaptive icon XMLs so they render our bitmap
+          mkdir -p decoded-apk/res/mipmap-anydpi-v26
+          cat > decoded-apk/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@android:color/transparent"/>
+              <foreground>
+                  <bitmap android:src="@drawable/aeronics_icon" android:gravity="center"/>
+              </foreground>
+          </adaptive-icon>
+          EOF
+          cp decoded-apk/res/mipmap-anydpi-v26/ic_launcher.xml decoded-apk/res/mipmap-anydpi-v26/ic_launcher_round.xml
 
-      - name: Align and Sign
+          # Also replace any direct foreground/background assets if present
+          find decoded-apk/res -type f -name 'ic_launcher_foreground.png' -exec cp custom/res/images/aeronics_icon.png {} \; || true
+          find decoded-apk/res -type f -name 'ic_launcher.png' -exec cp custom/res/images/aeronics_icon.png {} \; || true
+          find decoded-apk/res -type f -name 'ic_launcher_round.png' -exec cp custom/res/images/aeronics_icon.png {} \; || true
+
+          # 4) Extra: wipe Q button glyphs in QML/PNG if they exist
+          find decoded-apk -type f -name '*.qml' -exec sed -i 's/QGroundControl/Aeronics GCS/g' {} +
+
+      - name: Rebuild with AAPT2 (prevents crash)
+        run: |
+          java -jar apktool.jar b --use-aapt2 -o unsigned.apk decoded-apk
+
+      - name: Align and sign
         run: |
           zipalign -p -f 4 unsigned.apk aligned.apk
           java -jar uber-apk-signer.jar --allowResign -a aligned.apk --out signed
 
-      - name: Upload APK
+      - name: Upload final APK
         uses: actions/upload-artifact@v4
         with:
           name: Aeronics-GCS-APK
