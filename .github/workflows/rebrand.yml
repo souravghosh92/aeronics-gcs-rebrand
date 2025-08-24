@@ -19,54 +19,36 @@ jobs:
       - name: Ensure branding assets exist
         run: |
           set -e
-          test -f custom/res/images/aeronics_icon.png  || { echo "Missing custom/res/images/aeronics_icon.png";  exit 1; }
-          test -f custom/res/images/aeronics_logo.png  || { echo "Missing custom/res/images/aeronics_logo.png";  exit 1; }
-          if [ ! -f custom/res/images/splash.png ]; then
-            echo "custom/res/images/splash.png not present (that's OK)"
-          fi
+          test -f custom/res/images/aeronics_icon.png  || { echo "Missing aeronics_icon.png"; exit 1; }
+          test -f custom/res/images/aeronics_logo.png  || { echo "Missing aeronics_logo.png"; exit 1; }
 
       - name: Download base.apk from Release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download "$RELEASE_TAG" -p "$BASE_ASSET" -O base.apk
-          test -f base.apk || { echo "base.apk not found in release '$RELEASE_TAG'"; exit 1; }
+          test -f base.apk || { echo "base.apk not found"; exit 1; }
 
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Install ImageMagick
+      - name: Set up Java + Tools
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y imagemagick
-
-      - name: Download apktool & Uber APK Signer
-        run: |
-          set -eux
-          APKTOOL_VER=2.9.3
-          curl -L -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VER}/apktool_${APKTOOL_VER}.jar
+          sudo apt-get install -y imagemagick openjdk-17-jdk curl
+          curl -L -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
           curl -L -o apktool https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
           chmod +x apktool
           sudo mv apktool /usr/local/bin/
           mv apktool.jar /usr/local/bin/
-          UBER=v1.3.0
-          curl -L -o uber-apk-signer.jar https://github.com/patrickfav/uber-apk-signer/releases/download/${UBER}/uber-apk-signer-${UBER}.jar
 
       - name: Decode base APK
         run: |
           apktool d -f -o decoded base.apk
 
-      - name: Apply Aeronics launcher icon + manifest edits
+      - name: Apply Aeronics launcher icon
         run: |
           ICON="custom/res/images/aeronics_icon.png"
-
-          mkdir -p decoded/res/drawable-nodpi
+          mkdir -p decoded/res/mipmap-anydpi-v26 decoded/res/drawable-nodpi
           cp "$ICON" decoded/res/drawable-nodpi/aeronics_icon.png
 
-          mkdir -p decoded/res/mipmap-anydpi-v26
           cat > decoded/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
 <?xml version="1.0" encoding="utf-8"?>
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
@@ -81,68 +63,66 @@ EOF
           sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' decoded/AndroidManifest.xml || true
           sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' decoded/AndroidManifest.xml || true
 
-          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
-            mkdir -p "decoded/res/mipmap-$d"
-            cp "$ICON" "decoded/res/mipmap-$d/ic_launcher.png"
-            cp "$ICON" "decoded/res/mipmap-$d/ic_launcher_round.png"
-          done
-
-      - name: Replace in-app Q logos with Aeronics logo
+      - name: Replace Q logos inside menus
         run: |
-          set -euo pipefail
           SRC_LOGO="custom/res/images/aeronics_logo.png"
-          SRC_SPLASH="custom/res/images/splash.png"
-
-          mapfile -t TARGETS < <(find decoded -type f \( \
-              -iname "*qgc*.png" -o \
-              -iname "*qground*.png" -o \
-              -iname "logo.png" -o \
-              -iname "logo_*.png" -o \
-              -iname "*_logo.png" -o \
-              -iname "splash.png" -o \
-              -iname "splash_*.png" \
-            \) | sort -u)
-
-          echo "Found ${#TARGETS[@]} branded PNGs"
-          for t in "${TARGETS[@]}"; do
-            if echo "$t" | grep -qi 'splash' && [ -f "$SRC_SPLASH" ]; then
-              SRC="$SRC_SPLASH"
-            else
-              SRC="$SRC_LOGO"
-            fi
-
-            SIZE=$(identify -format "%wx%h" "$t" || echo "")
+          # Replace any likely QGC logo PNGs in resources (menus, toolbar, about, etc.)
+          find decoded -type f \( -iname "*qgc*.png" -o -iname "*qground*.png" -o -iname "logo*.png" -o -iname "toolbar*.png" -o -iname "brand*.png" \) | while read -r f; do
+            SIZE=$(identify -format "%wx%h" "$f" 2>/dev/null || echo "")
             if [ -n "$SIZE" ]; then
-              echo "Replacing $t with $SRC resized to $SIZE"
-              convert "$SRC" -resize "${SIZE}!" "png32:$t"
+              convert "$SRC_LOGO" -resize "${SIZE}!" "png32:$f"
             else
-              echo "Replacing $t with $SRC (no resize)"
-              convert "$SRC" "png32:$t"
+              cp "$SRC_LOGO" "$f"
             fi
           done
 
-      - name: Replace visible text QGroundControl → Aeronics GCS
+      - name: Replace splash screen if available
         run: |
-          grep -ril --exclude-dir=.git 'QGroundControl' decoded | xargs -r sed -i 's/QGroundControl/Aeronics GCS/g'
-
-      - name: Rename app label
-        run: |
-          if [ -f decoded/res/values/strings.xml ]; then
-            sed -i 's#<string name="app_name">[^<]*</string>#<string name="app_name">'${APP_NAME}'</string>#' decoded/res/values/strings.xml || true
+          if [ -f custom/res/images/splash.png ]; then
+            SRC_SPLASH="custom/res/images/splash.png"
+            find decoded -type f -iname "splash*.png" | while read -r f; do
+              SIZE=$(identify -format "%wx%h" "$f" 2>/dev/null || echo "")
+              if [ -n "$SIZE" ]; then
+                convert "$SRC_SPLASH" -resize "${SIZE}!" "png32:$f"
+              else
+                cp "$SRC_SPLASH" "$f"
+              fi
+            done
           fi
-          sed -i 's/android:label="[^"]*"/android:label="'${APP_NAME}'"/' decoded/AndroidManifest.xml || true
+
+      - name: Replace app text QGroundControl → Aeronics GCS
+        run: |
+          # Generic rename everywhere (QML, XML, JS, etc.)
+          grep -ril --exclude-dir=.git 'QGroundControl' decoded | xargs -r sed -i 's/QGroundControl/Aeronics GCS/g'
+          # Strings resource (if present)
+          if [ -f decoded/res/values/strings.xml ]; then
+            sed -i 's#<string name="app_name">.*</string>#<string name="app_name">Aeronics GCS</string>#' decoded/res/values/strings.xml || true
+          fi
+
+      - name: Rename footer/version labels to Aeronics
+        run: |
+          # Make sure any visible "QGroundControl Version" footer or About text is Aeronics-branded
+          grep -ril --exclude-dir=.git 'QGroundControl Version' decoded | xargs -r sed -i 's/QGroundControl Version/Aeronics GCS Version/g'
+          grep -ril --exclude-dir=.git 'QGroundControl v' decoded       | xargs -r sed -i 's/QGroundControl v/Aeronics GCS v/g'
+          # Sometimes shown as "About QGroundControl"
+          grep -ril --exclude-dir=.git 'About QGroundControl' decoded  | xargs -r sed -i 's/About QGroundControl/About Aeronics GCS/g'
 
       - name: Rebuild APK
         run: |
           apktool b decoded -o unsigned.apk
 
-      - name: Align & sign
+      - name: Sign APK
         run: |
-          rm -rf signed
-          java -jar uber-apk-signer.jar --apks unsigned.apk --out signed
+          # Use default Android debug keystore (auto-created if missing)
+          if [ ! -f ~/.android/debug.keystore ]; then
+            mkdir -p ~/.android
+            keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android -keypass android -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000
+          fi
+          jarsigner -keystore ~/.android/debug.keystore -storepass android -keypass android unsigned.apk androiddebugkey
+          mv unsigned.apk Aeronics-GCS.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: Aeronics-GCS-APK
-          path: signed/*.apk
+          path: Aeronics-GCS.apk
