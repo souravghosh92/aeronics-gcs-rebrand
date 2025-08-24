@@ -1,137 +1,92 @@
-name: Rebrand QGroundControl to Aeronics (APK)
+name: Rebrand QGroundControl to Aeronics GCS
 
 on:
-  workflow_dispatch: {}
-
-env:
-  APP_NAME: "Aeronics"
-  BASE_APK_URL: "https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk"
+  workflow_dispatch:
 
 jobs:
   rebrand:
     runs-on: ubuntu-22.04
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Java
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
-      - name: Tools
+      - name: Install tools (apktool, uber-apk-signer)
         run: |
-          set -e
-          sudo apt-get update -y
-          sudo apt-get install -y python3 file zip
           curl -L -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
           curl -L -o apktool https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
           chmod +x apktool
-          curl -L -o signer.jar https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar
-
-      - name: Branding images
-        run: |
-          set -e
-          mkdir -p branding
-          [ -f icon.png ] && cp -f icon.png branding/icon.png || { echo "icon.png missing"; exit 1; }
-          if   [ -f LogoDark.png ]; then cp -f LogoDark.png branding/inapp.png
-          elif [ -f LogoLight.png ]; then cp -f LogoLight.png branding/inapp.png
-          else cp -f branding/icon.png branding/inapp.png; fi
+          sudo mv apktool apktool.jar /usr/local/bin/
+          curl -L -o uber-apk-signer.jar https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar
 
       - name: Download base APK
         run: |
-          curl -L "$BASE_APK_URL" -o base.apk
-          ls -lah base.apk
+          curl -L -o base.apk https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk
 
-      - name: Decode
-        run: ./apktool d -f -o work base.apk
+      - name: Decode APK
+        run: |
+          java -jar /usr/local/bin/apktool.jar d base.apk -o decoded-apk --force
 
-      - name: App name (Manifest & strings)
+      - name: Apply branding images
         run: |
           set -e
-          sed -i 's/android:label="[^"]*"/android:label="'"$APP_NAME"'"/g' work/AndroidManifest.xml || true
-          find work/res -type f -name "strings.xml" -print0 | xargs -0 -r sed -i 's#<string name="app_name">[^<]*</string>#<string name="app_name">'"$APP_NAME"'</string>#g'
-          find work -type f -name "*.xml" -print0 | xargs -0 -r sed -i 's/Q[ ]*Ground[ ]*Control/'"$APP_NAME"'/g;s/QGroundControl/'"$APP_NAME"'/g'
+          mkdir -p branding
 
-      - name: Text replacements across QML/JS/resources
-        run: |
-          set -e
-          python3 - << 'PY'
-import os, subprocess, io, sys
-root="work"; olds=["QGroundControl","Q Ground Control"]; new=os.environ.get("APP_NAME","Aeronics")
-def is_text(p):
-    try:
-        t=subprocess.check_output(["file","-bi",p],text=True).strip()
-        return t.startswith("text/") or "charset=" in t
-    except: return False
-for dp,_,fs in os.walk(root):
-    for f in fs:
-        p=os.path.join(dp,f)
-        ext=(f.rsplit(".",1)[-1].lower() if "." in f else "")
-        if ext in ("qml","js","json","qrc","txt","ini","cfg","properties","xml","md","html","css"):
-            try:
-                s=open(p,"rb").read().decode("utf-8")
-            except: continue
-            changed=False
-            for o in olds:
-                if o in s: s=s.replace(o,new); changed=True
-            if changed: open(p,"wb").write(s.encode("utf-8"))
-        else:
-            if is_text(p):
-                try: s=open(p,"rb").read().decode("utf-8")
-                except: continue
-                changed=False
-                for o in olds:
-                    if o in s: s=s.replace(o,new); changed=True
-                if changed: open(p,"wb").write(s.encode("utf-8"))
-PY
+          # Launcher icon (required)
+          if [ -f icon.png ]; then
+            cp -f icon.png branding/icon.png
+          else
+            echo "❌ icon.png missing!"
+            exit 1
+          fi
 
-      - name: Launcher icons (mipmap/drawable)
-        run: |
-          set -e
-          for d in work/res/mipmap-*/; do
-            [ -d "$d" ] || continue
-            cp -f branding/icon.png "$d/ic_launcher.png" 2>/dev/null || true
-            cp -f branding/icon.png "$d/ic_launcher_round.png" 2>/dev/null || true
-          done
-          for d in work/res/drawable*/; do
-            [ -d "$d" ] || continue
-            cp -f branding/icon.png "$d/ic_launcher_foreground.png" 2>/dev/null || true
-            cp -f branding/icon.png "$d/ic_launcher_background.png" 2>/dev/null || true
+          # In-app logo (fallback to icon if not provided)
+          if [ -f LogoDark.png ]; then
+            cp -f LogoDark.png branding/inapp.png
+          elif [ -f LogoLight.png ]; then
+            cp -f LogoLight.png branding/inapp.png
+          else
+            cp -f branding/icon.png branding/inapp.png
+          fi
+
+          # Replace launcher icons
+          cp -f branding/icon.png decoded-apk/res/mipmap-xxhdpi-v4/ic_launcher.png || true
+          cp -f branding/icon.png decoded-apk/res/mipmap-xhdpi-v4/ic_launcher.png || true
+          cp -f branding/icon.png decoded-apk/res/mipmap-hdpi-v4/ic_launcher.png || true
+
+          # Replace all Q logos inside the app
+          for img in ic_qgc_logo.png qgc_icon.png qgc_logo.png qgc_logo_full.png; do
+            find decoded-apk/res/ -type f -name "$img" -exec cp -f branding/inapp.png {} \; || true
           done
 
-      - name: In‑app logos (common names & assets/)
+      - name: Update app name (strings.xml)
         run: |
-          set -e
-          # common filenames
-          for n in qgcLogo.png qgclogo.png qgc_logo.png qgcAppIcon.png productIcon.png \
-                   toolbarLogo.png appIcon.png AppIcon.png qgroundcontrol_logo.png \
-                   qgclogohires.png qgclogomed.png logo.png Logo.png; do
-            find work -type f -iname "$n" -exec cp -f branding/inapp.png {} \; 2>/dev/null || true
-          done
-          # anything under assets that looks like a logo/qgc image
-          find work/assets -type f -iregex '.*/.*\(logo\|qgc\)[^/]*\.\(png\|webp\|svg\)$' \
-            -exec cp -f branding/inapp.png {} \; 2>/dev/null || true
+          sed -i 's/QGroundControl/Aeronics GCS/g' decoded-apk/res/values/strings.xml || true
+          sed -i 's/QGroundControl/Aeronics GCS/g' decoded-apk/res/values*/strings.xml || true
 
-      - name: Build
-        run: ./apktool b work -o unsigned.apk
-
-      - name: Sign
+      - name: Rebuild APK
         run: |
-          java -jar signer.jar --apks unsigned.apk
-          mv *-aligned-debugSigned.apk Aeronics.apk
-          ls -lah Aeronics.apk
+          java -jar /usr/local/bin/apktool.jar b decoded-apk -o unsigned.apk
 
-      - name: Artifact (APK)
+      - name: Sign APK
+        run: |
+          java -jar uber-apk-signer.jar --apks unsigned.apk
+          mv unsigned-aligned-debugSigned.apk Aeronics-GCS.apk
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Aeronics-APK
-          path: Aeronics.apk
-          if-no-files-found: error
+          name: Aeronics-GCS-APK
+          path: Aeronics-GCS.apk
 
-      - name: Artifact (diagnosis)
+      - name: Upload decoded resources (diagnosis)
         uses: actions/upload-artifact@v4
         with:
           name: diagnosis
-          path: work
+          path: decoded-apk
