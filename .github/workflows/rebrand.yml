@@ -1,5 +1,4 @@
 name: Rebrand QGroundControl to Aeronics GCS
-
 on:
   workflow_dispatch:
 
@@ -8,28 +7,25 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Install dependencies
+      - name: Install tools
         run: |
           sudo apt-get update
           sudo apt-get install -y wget unzip zip openjdk-17-jdk
-
-      - name: Download apktool & uber-apk-signer
-        run: |
           curl -L -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
           curl -L -o apktool https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
           chmod +x apktool
           curl -L -o uber-apk-signer.jar https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar
 
-      - name: Download base QGroundControl APK
+      - name: Download base QGC APK
         run: |
           curl -L -o base.apk https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk
 
@@ -37,22 +33,55 @@ jobs:
         run: |
           java -jar apktool.jar d base.apk -o decoded-apk --force
 
-      - name: Apply Aeronics Branding
+      - name: Apply Aeronics branding (icons, logos, splash, text)
         run: |
-          # Replace icons & logos
-          cp custom/res/images/aeronics_icon.png decoded-apk/res/mipmap-xxhdpi-v4/ic_launcher.png
-          cp custom/res/images/aeronics_icon.png decoded-apk/res/mipmap-xxxhdpi-v4/ic_launcher.png
-          cp custom/res/images/aeronics_logo.png decoded-apk/res/drawable/logo.png
-          cp custom/res/images/splash.png decoded-apk/res/drawable/splash.png
+          set -e
 
-          # Add qrc and plugin
-          mkdir -p decoded-apk/custom
-          cp qgc_custom.qrc decoded-apk/custom/qgc_custom.qrc
-          cp CustomPlugin.cc decoded-apk/custom/CustomPlugin.cc
+          ICON_SRC="custom/res/images/aeronics_icon.png"
+          LOGO_SRC="custom/res/images/aeronics_logo.png"
+          SPLASH_SRC="custom/res/images/splash.png"
 
-          # Replace text branding
-          find decoded-apk -type f -name "*.xml" -exec sed -i 's/QGroundControl/Aeronics GCS/g' {} +
+          test -f "$ICON_SRC" && test -f "$LOGO_SRC" && test -f "$SPLASH_SRC"
+
+          # 1) Launcher icons (copy to every density group that exists)
+          for d in decoded-apk/res/mipmap-*dpi*; do
+            if [ -d "$d" ]; then
+              cp "$ICON_SRC" "$d/ic_launcher.png" || true
+              cp "$ICON_SRC" "$d/ic_launcher_round.png" 2>/dev/null || true
+              cp "$ICON_SRC" "$d/ic_qgc.png" 2>/dev/null || true
+            fi
+          done
+
+          # 2) In‑app Q logos (common QGC places)
+          # Try several likely targets; ignore missing ones.
+          cp "$LOGO_SRC" decoded-apk/res/drawable/logo.png 2>/dev/null || true
+          cp "$LOGO_SRC" decoded-apk/res/drawable/ic_qgc.png 2>/dev/null || true
+          cp "$LOGO_SRC" decoded-apk/res/drawable/qgc_logo.png 2>/dev/null || true
+          cp "$LOGO_SRC" decoded-apk/res/drawable/qgroundcontrol.png 2>/dev/null || true
+
+          # Also patch vector or XML drawables that reference bitmap names
+          find decoded-apk/res -type f -name "*.xml" -print0 \
+            | xargs -0 sed -i \
+              -e 's/ic_qgc/logo/g' \
+              -e 's/qgc_logo/logo/g' \
+              -e 's/qgroundcontrol/logo/g'
+
+          # 3) Splash artwork (several variants)
+          cp "$SPLASH_SRC" decoded-apk/res/drawable/splash.png 2>/dev/null || true
+          cp "$SPLASH_SRC" decoded-apk/res/drawable/splash_image.png 2>/dev/null || true
+          cp "$SPLASH_SRC" decoded-apk/res/drawable-nodpi/splash.png 2>/dev/null || true
+
+          # 4) Rename all visible strings to Aeronics GCS
+          find decoded-apk -type f -name "*.xml"   -exec sed -i 's/QGroundControl/Aeronics GCS/g' {} +
           find decoded-apk -type f -name "*.smali" -exec sed -i 's/QGroundControl/Aeronics GCS/g' {} +
+
+          # 5) Ensure app label in AndroidManifest
+          MANIFEST="decoded-apk/AndroidManifest.xml"
+          if grep -q 'android:label=' "$MANIFEST"; then
+            sed -i 's/android:label="[^"]*"/android:label="Aeronics GCS"/' "$MANIFEST"
+          else
+            sed -i 's/<application /<application android:label="Aeronics GCS" /' "$MANIFEST"
+          fi
 
       - name: Rebuild APK
         run: |
@@ -63,7 +92,7 @@ jobs:
           java -jar uber-apk-signer.jar --apks Aeronics-GCS-unsigned.apk
           mv Aeronics-GCS-unsigned-aligned-debugSigned.apk Aeronics-GCS.apk
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: Aeronics-GCS-APK
