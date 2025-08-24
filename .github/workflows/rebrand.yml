@@ -1,153 +1,180 @@
-name: Rebrand QGroundControl to Aeronics GCS
+name: Rebrand QGroundControl to Aeronics GCS (APK)
 
 on:
   workflow_dispatch:
-    inputs:
-      base_apk_url:
-        description: "Direct download URL of the base APK (e.g., your GitHub release asset URL)"
-        required: true
-        type: string
+
+permissions:
+  contents: read
+
+env:
+  # ⬇️ Put your APK download URL here (a public or your repo's release asset URL)
+  BASE_APK_URL: "https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk"
+
+  # File names for your images stored in repo under custom/res/images/
+  ICON_FILE: "custom/res/images/aeronics_icon.png"
+  LOGO_FILE: "custom/res/images/aeronics_logo.png"
+  SPLASH_FILE: "custom/res/images/splash.png"
+
+  # New branding text
+  NEW_APP_NAME: "Aeronics GCS"
 
 jobs:
   rebrand:
     runs-on: ubuntu-22.04
-    permissions:
-      contents: read
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Java (for apktool / signing)
+      - name: Ensure images exist
+        run: |
+          set -e
+          for f in "$ICON_FILE" "$LOGO_FILE"; do
+            if [ ! -s "$f" ]; then
+              echo "❌ Missing required image: $f"
+              exit 1
+            fi
+          done
+          echo "✅ Branding images found."
+
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
-            distribution: temurin
-            java-version: "17"
+          distribution: temurin
+          java-version: '17'
 
-      - name: Download tools (apktool + wrapper + uber-apk-signer)
+      - name: Install tools (apktool, signer, imagemagick, aapt)
         run: |
-          set -euxo pipefail
-          curl -sL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
-          curl -sL -o apktool https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y imagemagick aapt zipalign
+          curl -L -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
+          curl -L -o apktool https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
           chmod +x apktool
-          curl -sL -o uber-apk-signer.jar https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar
+          curl -L -o uber-apk-signer.jar https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar
 
       - name: Download base APK
         run: |
-          set -euxo pipefail
-          curl -L "${{ inputs.base_apk_url }}" -o base.apk
+          set -eux
+          curl -L "$BASE_APK_URL" -o base.apk
+          echo "Downloaded APK:"
           ls -lh base.apk
+          aapt dump badging base.apk | head -n 20 || true
 
       - name: Decode APK
         run: |
-          set -euxo pipefail
-          ./apktool d -f -o decoded-apk base.apk
-          echo "==== decoded-apk top ===="
-          ls -la decoded-apk | sed -n '1,120p'
+          set -eux
+          java -jar apktool.jar d -f -o decoded-apk base.apk
 
-      - name: Show decoded resources (debug)
+      - name: DEBUG — list decoded contents
         run: |
-          set -euxo pipefail
-          echo "==== res folders ===="
-          ls -la decoded-apk/res | sed -n '1,200p' || true
-          echo "==== values files ===="
-          find decoded-apk/res -maxdepth 1 -type f -name '*.xml' -print || true
-          echo "==== values dirs ===="
-          find decoded-apk/res -type d -name 'values*' -print || true
+          echo "=== Top-level in decoded-apk ==="
+          (cd decoded-apk && find . -maxdepth 2 -type d | sort)
+          echo "=== Look for strings mentioning QGroundControl or QGC ==="
+          grep -R --line-number -E "QGroundControl|QGC" decoded-apk/res || true
+          echo "=== Common res folders present ==="
+          (cd decoded-apk/res && ls -1 | sort)
 
-      - name: Verify Aeronics branding images exist
+      - name: Replace app name in strings
         run: |
-          set -euxo pipefail
-          ls -l custom/res/images || true
-          test -f custom/res/images/aeronics_icon.png
-          test -f custom/res/images/aeronics_logo.png
-          test -f custom/res/images/splash.png
-
-      - name: Apply Aeronics app name (strings.xml)
-        run: |
-          set -euxo pipefail
-          # Change app_name and any human-facing names to "Aeronics GCS"
-          for f in $(find decoded-apk/res -type f -name "strings.xml"); do
-            echo "Patching $f"
-            sed -i 's/>QGroundControl</>Aeronics GCS</g' "$f" || true
-            sed -i 's/>QGC</>Aeronics GCS</g' "$f" || true
-            sed -i 's/\"QGroundControl\"/\"Aeronics GCS\"/g' "$f" || true
+          set -eux
+          # Replace in all values XMLs (some APKs split strings across locales)
+          for f in decoded-apk/res/values*/strings*.xml; do
+            [ -f "$f" ] || continue
+            sed -i "s/>QGroundControl</>${NEW_APP_NAME}</g" "$f" || true
+            sed -i "s/>Q Ground Control</>${NEW_APP_NAME}</g" "$f" || true
+            sed -i "s/>QGC</>${NEW_APP_NAME}</g" "$f" || true
           done
+          echo "✅ Strings replacement attempted."
 
-          # Some builds keep extra UI strings with QGC text
-          find decoded-apk -type f -name "*.qml" -print0 | xargs -0 -I {} sed -i 's/QGroundControl/Aeronics GCS/g' "{}" || true
-          find decoded-apk -type f -name "*.json" -print0 | xargs -0 -I {} sed -i 's/QGroundControl/Aeronics GCS/g' "{}" || true
-          find decoded-apk -type f -name "*.txt" -print0 | xargs -0 -I {} sed -i 's/QGroundControl/Aeronics GCS/g' "{}" || true
-
-      - name: Replace launcher icons (mipmap-*)
+      - name: Replace launcher icons (mipmap densities)
         run: |
-          set -euxo pipefail
-          ICON=custom/res/images/aeronics_icon.png
-          # Overwrite common launcher icon names across all densities
-          for d in $(find decoded-apk/res -maxdepth 1 -type d -name "mipmap-*"); do
-            echo "Updating icons in $d"
-            for n in ic_launcher.png ic_launcher_round.png ic_qgc.png ic_qgroundcontrol.png; do
-              if [ -f "$d/$n" ]; then
-                cp "$ICON" "$d/$n"
-              fi
-            done
-          done
-
-      - name: Replace in-app logos (drawable*)
-        run: |
-          set -euxo pipefail
-          LOGO=custom/res/images/aeronics_logo.png
-          SPLASH=custom/res/images/splash.png
-
-          # Replace any file that looks like the Q logo
-          while IFS= read -r -d '' p; do
-            echo "Replacing logo $p"
-            cp "$LOGO" "$p"
-          done < <(find decoded-apk/res -type f -iname '*qgc*.png' -print0)
-
-          # Common generic logo names
-          for d in $(find decoded-apk/res -type d -name "drawable*"); do
-            for n in logo.png app_logo.png qgc_logo.png qgroundcontrol_logo.png aboutLogo.png; do
+          set -eux
+          # Try common Android launcher names
+          for d in decoded-apk/res/mipmap-*; do
+            [ -d "$d" ] || continue
+            for n in ic_launcher.png ic_launcher_round.png ic_launcher_foreground.png; do
               if [ -f "$d/$n" ]; then
                 echo "Replacing $d/$n"
-                cp "$LOGO" "$d/$n"
-              fi
-            done
-            # Splash artwork, if present
-            for s in splash.png splashscreen.png qgc_splash.png; do
-              if [ -f "$d/$s" ]; then
-                echo "Replacing $d/$s"
-                cp "$SPLASH" "$d/$s"
+                cp "$ICON_FILE" "$d/$n" || true
               fi
             done
           done
+          echo "✅ Launcher icon replacement attempted."
 
-      - name: Extra text scrub (Q → Aeronics GCS) in QML & assets
+      - name: Replace in-app logos (common qgc/logo names)
         run: |
-          set -euxo pipefail
-          # UI strings inside QML, JS, and plaintext assets
-          for ext in qml js txt md qrc; do
-            find decoded-apk -type f -name "*.${ext}" -print0 | xargs -0 -I {} sed -i 's/QGroundControl/Aeronics GCS/g' "{}" || true
-            find decoded-apk -type f -name "*.${ext}" -print0 | xargs -0 -I {} sed -i 's/\bQGC\b/Aeronics GCS/g' "{}" || true
+          set -eux
+          # Replace any images that look like qgc / logo / brand in drawable*/mipmap*/raw*/assets
+          # We will copy our logo into those names if they exist.
+          find decoded-apk/res -type f \( -name "*qgc*.png" -o -name "*logo*.png" -o -name "*brand*.png" \) -print0 | while IFS= read -r -d '' p; do
+            echo "Replacing $p"
+            cp "$LOGO_FILE" "$p" || true
           done
 
-      - name: Build unsigned APK with apktool
+          # A few very common specific names (if present)
+          for p in \
+            decoded-apk/res/drawable*/qgc_logo.png \
+            decoded-apk/res/drawable*/qgc_logo_foreground.png \
+            decoded-apk/res/drawable*/logo_qgc.png \
+            decoded-apk/res/drawable*/splash.png \
+            decoded-apk/res/mipmap*/qgc_logo.png \
+            decoded-apk/res/drawable*/ic_qgc.png \
+          ; do
+            [ -f "$p" ] && cp "$LOGO_FILE" "$p" || true
+          done
+          # Optional splash replacement
+          if [ -s "$SPLASH_FILE" ]; then
+            for p in decoded-apk/res/drawable*/splash.png; do
+              [ -f "$p" ] && cp "$SPLASH_FILE" "$p" || true
+            done
+          fi
+          echo "✅ In-app logo replacement attempted."
+
+      - name: DEBUG — verify replacements
         run: |
-          set -euxo pipefail
-          ./apktool b -o unsigned.apk decoded-apk
+          echo "=== Check any remaining Q* strings in res ==="
+          grep -R --line-number -E "QGroundControl|QGC" decoded-apk/res || echo "No 'QGroundControl'/'QGC' strings found in res."
+          echo "=== Show a few icon files that now exist ==="
+          find decoded-apk/res -type f -name "ic_launcher*.png" | head -n 20
+          echo "=== Show a few *logo*.png files ==="
+          find decoded-apk/res -type f -name "*logo*.png" | head -n 20
+
+      - name: Rebuild APK (unsigned)
+        run: |
+          set -eux
+          java -jar apktool.jar b -o unsigned.apk decoded-apk
           ls -lh unsigned.apk
 
-      - name: Sign and align APK (uber-apk-signer)
+      - name: Align (zipalign) and Sign APK
         run: |
-          set -euxo pipefail
-          java -jar uber-apk-signer.jar -a unsigned.apk -o out --allowResign
-          ls -la out
-          mv out/unsigned-aligned-signed.apk Aeronics-GCS.apk
-          ls -lh Aeronics-GCS.apk
+          set -eux
+          # First align
+          zipalign -p -f 4 unsigned.apk unsigned-aligned.apk || cp unsigned.apk unsigned-aligned.apk
+          # Then sign with a default test key (built-in to uber-apk-signer)
+          java -jar uber-apk-signer.jar --allowResign -a unsigned-aligned.apk --out signed
+          ls -lh signed
 
-      - name: Upload Aeronics-GCS.apk
+      - name: Pack diagnosis (for troubleshooting if needed)
+        run: |
+          set -eux
+          mkdir -p diag
+          (cd decoded-apk && (find . -maxdepth 2 -type d | sort) > ../diag/tree.txt)
+          (grep -R --line-number -E "QGroundControl|QGC" decoded-apk/res || true) > diag/grep_strings.txt
+          (find decoded-apk/res -type f -name "*logo*.png" | sort) > diag/logos_found.txt
+          (find decoded-apk/res -type f -name "ic_launcher*.png" | sort) >> diag/logos_found.txt
+          zip -r diagnosis.zip diag
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Aeronics-GCS
-          path: Aeronics-GCS.apk
-          if-no-files-found: error
+          name: Aeronics-GCS-APK
+          path: |
+            signed/*.apk
+
+      - name: Upload diagnosis artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnosis
+          path: |
+            diagnosis.zip
