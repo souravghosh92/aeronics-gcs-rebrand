@@ -1,5 +1,4 @@
 name: Rebrand QGroundControl to Aeronics GCS
-
 on:
   workflow_dispatch:
 
@@ -8,49 +7,122 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ANDROID_HOME: ${{ github.workspace }}/android-sdk
-      PATH: ${{ github.workspace }}/android-sdk/cmdline-tools/latest/bin:${{ github.workspace }}/android-sdk/platform-tools:${{ github.workspace }}/android-sdk/build-tools/34.0.0:${{ env.PATH }}
       BASE_APK: branding/base.apk
       ICON: custom/res/images/aeronics_icon.png
+      LOGO: custom/res/images/aeronics_logo.png
+      SPLASH: custom/res/images/splash.png
       APP_NAME: "Aeronics GCS"
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
-      - name: Install system deps
+      - name: Install system tools
         run: |
           sudo apt-get update
           sudo apt-get install -y openjdk-17-jdk unzip zipalign apksigner imagemagick curl
 
-      - name: Install Android SDK
+      - name: Install Android SDK (cmdline-tools + build-tools)
         run: |
           mkdir -p "$ANDROID_HOME/cmdline-tools"
           cd "$ANDROID_HOME/cmdline-tools"
           curl -L -o tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
           unzip -q tools.zip -d latest
-          yes | sdkmanager --licenses
-          sdkmanager --install "platforms;android-31" "build-tools;34.0.0" "platform-tools"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-31" "build-tools;34.0.0" "platform-tools"
 
-      - name: Download apktool
+      - name: Install apktool
         run: |
           curl -L -o /usr/local/bin/apktool https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
           curl -L -o /usr/local/bin/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
           chmod +x /usr/local/bin/apktool
 
-      - name: Check required assets
+      - name: Check required assets exist
         run: |
           test -f "$BASE_APK" || (echo "Missing $BASE_APK"; exit 1)
-          test -f "$ICON" || (echo "Missing icon at $ICON"; exit 1)
+          test -f "$ICON"     || (echo "Missing $ICON"; exit 1)
+          test -f "$LOGO"     || (echo "Missing $LOGO"; exit 1)
 
       - name: Decode base APK
         run: apktool d -f -o decoded "$BASE_APK"
 
-      - name: Apply branding
+      # -------------------------
+      # Launcher name + icons
+      # -------------------------
+      - name: Set launcher label and adaptive icon
         run: |
+          # 1) Force label in manifest
           sed -i 's/android:label="[^"]*"/android:label="'${APP_NAME}'"/' decoded/AndroidManifest.xml || true
+
+          # 2) Use our ic_launcher references
           sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' decoded/AndroidManifest.xml || true
-          mkdir -p decoded/res/drawable-nodpi
+          sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' decoded/AndroidManifest.xml || true
+
+          # 3) Adaptive icon XML → points to our bitmap
+          mkdir -p decoded/res/mipmap-anydpi-v26 decoded/res/drawable-nodpi
           cp "$ICON" decoded/res/drawable-nodpi/aeronics_icon.png
+          cat > decoded/res/mipmap-anydpi-v26/ic_launcher.xml <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+  <background android:drawable="@android:color/transparent"/>
+  <foreground>
+    <bitmap android:src="@drawable/aeronics_icon" android:gravity="center"/>
+  </foreground>
+</adaptive-icon>
+XML
+          cp decoded/res/mipmap-anydpi-v26/ic_launcher.xml decoded/res/mipmap-anydpi-v26/ic_launcher_round.xml
+
+          # 4) Also drop some legacy mipmaps (fallback for older devices)
+          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            mkdir -p "decoded/res/mipmap-$d"
+            # scale the icon to typical launcher sizes (rough safe defaults)
+            case "$d" in
+              mdpi)   size=48  ;;
+              hdpi)   size=72  ;;
+              xhdpi)  size=96  ;;
+              xxhdpi) size=144 ;;
+              xxxhdpi)size=192 ;;
+            esac
+            convert "$ICON" -resize ${size}x${size} "decoded/res/mipmap-$d/ic_launcher.png"
+            cp "decoded/res/mipmap-$d/ic_launcher.png" "decoded/res/mipmap-$d/ic_launcher_round.png"
+          done
+
+      # -------------------------
+      # In‑app rebranding (logos + strings)
+      # -------------------------
+      - name: Replace in‑app logos and text
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # 1) Replace obvious string resources
+          #    (keeps other strings intact)
+          find decoded/res/values* -type f -name "*.xml" -print0 | xargs -0 sed -i \
+            -e 's#<string name="app_name">[^<]*</string>#<string name="app_name">'${APP_NAME}'</string>#g' \
+            -e 's/QGroundControl/'"${APP_NAME}"'/g'
+
+          # 2) Replace literal occurrences in QML, JS, JSON, TXT, XML assets
+          find decoded -type f \( -name "*.qml" -o -name "*.js" -o -name "*.json" -o -name "*.txt" -o -name "*.xml" \) \
+            -print0 | xargs -0 sed -i 's/QGroundControl/'"${APP_NAME}"'/g'
+
+          # 3) Overwrite any image that looks like a Q logo / splash / logo
+          #    (we keep file names the same but swap the content)
+          if [ -f "$SPLASH" ]; then SPLASH_SRC="$SPLASH"; else SPLASH_SRC="$LOGO"; fi
+
+          while IFS= read -r -d '' png; do
+            lower="$(basename "$png" | tr '[:upper:]' '[:lower:]')"
+            if echo "$lower" | grep -Eq '(^|_)q(gc|groundcontrol)|logo|splash|about|brand'; then
+              # choose logo or splash depending on name
+              if echo "$lower" | grep -q 'splash'; then
+                cp "$SPLASH_SRC" "$png"
+              else
+                cp "$LOGO" "$png"
+              fi
+            fi
+          done < <(find decoded -type f -name "*.png" -print0)
 
       - name: Rebuild APK
         run: apktool b decoded -o unsigned.apk
