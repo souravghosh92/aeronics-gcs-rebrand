@@ -8,9 +8,9 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      RELEASE_TAG: base-apk         # Release tag which contains base.apk
-      BASE_ASSET: base.apk          # Asset name in the release
-      APP_NAME: "Aeronics GCS"      # New visible app name
+      RELEASE_TAG: base-apk
+      BASE_ASSET: base.apk
+      APP_NAME: "Aeronics GCS"
 
     steps:
       - name: Checkout repo
@@ -21,7 +21,6 @@ jobs:
           set -e
           test -f custom/res/images/aeronics_icon.png  || { echo "Missing custom/res/images/aeronics_icon.png";  exit 1; }
           test -f custom/res/images/aeronics_logo.png  || { echo "Missing custom/res/images/aeronics_logo.png";  exit 1; }
-          # splash is optional
           if [ ! -f custom/res/images/splash.png ]; then
             echo "custom/res/images/splash.png not present (that's OK)"
           fi
@@ -39,7 +38,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Install ImageMagick (for in-app logo resizing)
+      - name: Install ImageMagick
         run: |
           sudo apt-get update -y
           sudo apt-get install -y imagemagick
@@ -64,7 +63,6 @@ jobs:
         run: |
           ICON="custom/res/images/aeronics_icon.png"
 
-          # Place adaptive icon xml + bitmap
           mkdir -p decoded/res/drawable-nodpi
           cp "$ICON" decoded/res/drawable-nodpi/aeronics_icon.png
 
@@ -80,67 +78,54 @@ jobs:
 EOF
           cp decoded/res/mipmap-anydpi-v26/ic_launcher.xml decoded/res/mipmap-anydpi-v26/ic_launcher_round.xml
 
-          # Force manifest to use our launcher icons
           sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' decoded/AndroidManifest.xml || true
           sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' decoded/AndroidManifest.xml || true
 
-          # Provide density bitmaps (simple square copy is OK for now)
           for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
             mkdir -p "decoded/res/mipmap-$d"
             cp "$ICON" "decoded/res/mipmap-$d/ic_launcher.png"
             cp "$ICON" "decoded/res/mipmap-$d/ic_launcher_round.png"
           done
 
-      - name: Replace in-app Q logos with Aeronics logo (PNG only)
-        shell: bash
+      - name: Replace in-app Q logos with Aeronics logo
         run: |
           set -euo pipefail
           SRC_LOGO="custom/res/images/aeronics_logo.png"
           SRC_SPLASH="custom/res/images/splash.png"
 
-          # Candidate PNGs that usually hold QGC branding
           mapfile -t TARGETS < <(find decoded -type f \( \
-              -iname "*qgc*.png"            -o \
-              -iname "*qground*.png"        -o \
-              -iname "logo.png"             -o \
-              -iname "logo_*.png"           -o \
-              -iname "*_logo.png"           -o \
-              -iname "splash.png"           -o \
-              -iname "splash_*.png"         -o \
-              -path "*/res/drawable*/logo*.png" -o \
-              -path "*/res/drawable*/qgc*.png"  -o \
-              -path "*/res/drawable*/qground*.png" \
+              -iname "*qgc*.png" -o \
+              -iname "*qground*.png" -o \
+              -iname "logo.png" -o \
+              -iname "logo_*.png" -o \
+              -iname "*_logo.png" -o \
+              -iname "splash.png" -o \
+              -iname "splash_*.png" \
             \) | sort -u)
 
-          echo "Found ${#TARGETS[@]} candidate branded PNGs"
+          echo "Found ${#TARGETS[@]} branded PNGs"
           for t in "${TARGETS[@]}"; do
-            # Prefer splash artwork for splash-like files, otherwise general logo
             if echo "$t" | grep -qi 'splash' && [ -f "$SRC_SPLASH" ]; then
               SRC="$SRC_SPLASH"
             else
               SRC="$SRC_LOGO"
             fi
 
-            # Keep same dimensions as target
             SIZE=$(identify -format "%wx%h" "$t" || echo "")
             if [ -n "$SIZE" ]; then
               echo "Replacing $t with $SRC resized to $SIZE"
-              convert "$SRC" -resize "${SIZE}!" -define png:color-type=6 "png32:$t"
+              convert "$SRC" -resize "${SIZE}!" "png32:$t"
             else
-              echo "Replacing $t (size unknown) with $SRC (no resize)"
+              echo "Replacing $t with $SRC (no resize)"
               convert "$SRC" "png32:$t"
             fi
           done
 
-      - name: Replace visible text "QGroundControl" → "Aeronics GCS"
+      - name: Replace visible text QGroundControl → Aeronics GCS
         run: |
-          # Update strings/QML/XML where the product name is visible
-          set +e
           grep -ril --exclude-dir=.git 'QGroundControl' decoded | xargs -r sed -i 's/QGroundControl/Aeronics GCS/g'
-          # If you also want to reduce "QGC" short form, uncomment next line
-          # grep -ril --exclude-dir=.git '\bQGC\b' decoded | xargs -r sed -i 's/\bQGC\b/AGCS/g'
 
-      - name: Rename app label if present in resources
+      - name: Rename app label
         run: |
           if [ -f decoded/res/values/strings.xml ]; then
             sed -i 's#<string name="app_name">[^<]*</string>#<string name="app_name">'${APP_NAME}'</string>#' decoded/res/values/strings.xml || true
