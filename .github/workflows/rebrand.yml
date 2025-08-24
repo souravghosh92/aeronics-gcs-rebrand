@@ -34,10 +34,9 @@ jobs:
         run: |
           set -e
           mkdir -p branding
-          [ -f icon.png ] || (echo "Missing icon.png (512x512 PNG) at repo root"; exit 1)
           cp -f icon.png branding/icon.png
-          if [ -f LogoLight.png ]; then cp -f LogoLight.png branding/LogoLight.png; else cp -f icon.png branding/LogoLight.png; fi
-          if [ -f LogoDark.png ]; then cp -f LogoDark.png branding/LogoDark.png; else cp -f icon.png branding/LogoDark.png; fi
+          cp -f LogoLight.png branding/LogoLight.png || cp -f icon.png branding/LogoLight.png
+          cp -f LogoDark.png branding/LogoDark.png || cp -f icon.png branding/LogoDark.png
           cp -f branding/LogoLight.png branding/aeronics_logo.png
 
       - name: Rename app label
@@ -50,62 +49,35 @@ jobs:
       - name: Replace launcher icons
         run: |
           for d in mipmap-mdpi mipmap-hdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
-            if [ -d "work/res/$d" ]; then
-              cp -f branding/icon.png "work/res/$d/ic_launcher.png" || true
-              cp -f branding/icon.png "work/res/$d/ic_launcher_round.png" || true
-            fi
+            cp -f branding/icon.png "work/res/$d/ic_launcher.png" 2>/dev/null || true
+            cp -f branding/icon.png "work/res/$d/ic_launcher_round.png" 2>/dev/null || true
           done
           for d in drawable-anydpi-v26 drawable-v26 mipmap-anydpi-v26; do
-            if [ -d "work/res/$d" ]; then
-              cp -f branding/icon.png "work/res/$d/ic_launcher_foreground.png" || true
-              cp -f branding/icon.png "work/res/$d/ic_launcher_background.png" || true
-            fi
+            cp -f branding/icon.png "work/res/$d/ic_launcher_foreground.png" 2>/dev/null || true
+            cp -f branding/icon.png "work/res/$d/ic_launcher_background.png" 2>/dev/null || true
           done
 
       - name: Replace all drawable icon.png
         run: |
           for d in drawable-ldpi drawable-mdpi drawable-hdpi drawable-xhdpi drawable-xxhdpi drawable-xxxhdpi; do
-            if [ -f "work/res/$d/icon.png" ]; then
-              cp -f branding/icon.png "work/res/$d/icon.png"
-            fi
+            cp -f branding/icon.png "work/res/$d/icon.png" 2>/dev/null || true
           done
 
       - name: Overwrite other QGC logos
         run: |
-          set -x
           for n in qgcLogo.png qgclogo.png QGCLogo.png qgcAppIcon.png productIcon.png toolbarLogo.png appIcon.png AppIcon.png logo.png Logo.png; do
-            find work -type f -iname "$n" -print -exec cp -f branding/aeronics_logo.png {} \; || true
+            find work -type f -iname "$n" -exec cp -f branding/aeronics_logo.png {} \; 2>/dev/null || true
           done
-          find work -type f -iregex '.*/\(logo\|qgc\)[^/]*\.\(png\|svg\)$' -print \
-            -exec cp -f branding/aeronics_logo.png {} \; || true
-          find work -type f -iregex '.*/splash[^/]*\.png$' -print \
-            -exec cp -f branding/icon.png {} \; || true
-          find work -type f -iregex '.*/splash[^/]*\.9\.png$' -print \
-            -exec cp -f branding/icon.png {} \; true
+          find work -type f -iregex '.*/\(logo\|qgc\)[^/]*\.\(png\|svg\)$' -exec cp -f branding/aeronics_logo.png {} \; 2>/dev/null || true
+          find work -type f -iregex '.*/splash[^/]*\.png$' -exec cp -f branding/icon.png {} \; 2>/dev/null || true
+          find work -type f -iregex '.*/splash[^/]*\.9\.png$' -exec cp -f branding/icon.png {} \; 2>/dev/null || true
 
       - name: Replace visible text in QML/JS
         run: |
           for ext in qml js json; do
-            grep -RIl --include="*.${ext}" "QGroundControl" work 2>/dev/null \
-              | xargs -r sed -i 's/QGroundControl/Aeronics GCS/g'
+            grep -RIl --include="*.${ext}" "QGroundControl" work 2>/dev/null | xargs -r sed -i 's/QGroundControl/Aeronics GCS/g'
           done
-          grep -RIl --include="*.qml" "QGroundControl Version" work 2>/dev/null \
-            | xargs -r sed -i 's/QGroundControl Version/Aeronics GCS Version/g'
-
-      - name: Diagnose locations (optional)
-        run: |
-          grep -RInEI "QGroundControl" work > hits.txt || true
-          find work -type f -iregex '.*\(logo\|qgc\|icon\).*\.\(png\|svg\)$' -print > images.txt || true
-          (cd work && zip -r ../decoded-apk.zip .) || true
-
-      - name: Upload diagnosis
-        uses: actions/upload-artifact@v4
-        with:
-          name: diagnosis
-          path: |
-            hits.txt
-            images.txt
-            decoded-apk.zip
+          grep -RIl --include="*.qml" "QGroundControl Version" work 2>/dev/null | xargs -r sed -i 's/QGroundControl Version/Aeronics GCS Version/g'
 
       - name: Rebuild unsigned APK
         run: java -jar apktool.jar b work -o unsigned.apk
