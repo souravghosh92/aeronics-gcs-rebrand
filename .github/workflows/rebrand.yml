@@ -3,120 +3,146 @@ name: Rebrand QGroundControl to Aeronics GCS
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   rebrand:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Java + ImageMagick
+      # ---------- prerequisites ----------
+      - name: Install Java + ImageMagick + zipalign deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y openjdk-17-jre-headless imagemagick
+          sudo apt-get install -y default-jdk imagemagick jq
 
-      - name: Install Android SDK build-tools (zipalign, apksigner)
-        uses: android-actions/setup-android@v3
-      - name: Install build-tools 34.0.0
+      - name: Install Android SDK build-tools (zipalign + apksigner)
+        env:
+          ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk
         run: |
-          sdkmanager --install "build-tools;34.0.0"
-          echo "BUILD_TOOLS=$ANDROID_HOME/build-tools/34.0.0" >> $GITHUB_ENV
+          set -eux
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          cd "$ANDROID_SDK_ROOT"
+          curl -sL -o tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q tools.zip -d cmdline-tools
+          mv cmdline-tools/cmdline-tools cmdline-tools/latest
+          yes | cmdline-tools/latest/bin/sdkmanager --sdk_root="$ANDROID_SDK_ROOT" "build-tools;34.0.0" > /dev/null
+          echo "BUILD_TOOLS=$ANDROID_SDK_ROOT/build-tools/34.0.0" >> $GITHUB_ENV
 
       - name: Download apktool
         run: |
-          curl -L -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
-          echo -e '#!/usr/bin/env bash\njava -jar "$PWD/apktool.jar" "$@"' > apktool
-          chmod +x apktool
+          set -eux
+          curl -sL -o apktool.jar https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar
+          echo 'java -jar /usr/local/bin/apktool.jar "$@"' | sudo tee /usr/local/bin/apktool >/dev/null
+          sudo mv apktool.jar /usr/local/bin/
+          sudo chmod +x /usr/local/bin/apktool
 
+      # ---------- inputs present? ----------
       - name: Check required assets exist
         run: |
+          set -eux
           test -f branding/base.apk || (echo "Missing branding/base.apk" && exit 1)
           test -f custom/res/images/aeronics_icon.png || (echo "Missing custom/res/images/aeronics_icon.png" && exit 1)
           test -f custom/res/images/aeronics_logo.png || (echo "Missing custom/res/images/aeronics_logo.png" && exit 1)
+          # splash optional
+          if [ ! -f custom/res/images/splash.png ]; then
+            echo "NOTE: custom/res/images/splash.png not found (that's OK)."
+          fi
 
+      # ---------- decode ----------
       - name: Decode base APK
         run: |
-          rm -rf decoded-apk
-          ./apktool d -f branding/base.apk -o decoded-apk
+          set -eux
+          rm -rf work dist
+          mkdir -p work dist
+          cp branding/base.apk base.apk
+          apktool d -f -o work base.apk
 
-      - name: Apply Aeronics branding
+      # ---------- apply branding ----------
+      - name: Replace launcher + menu icons with Aeronics ones
         run: |
-          set -e
-          # 1) Replace app name everywhere
-          sed -i 's/QGroundControl/Aeronics GCS/g' decoded-apk/AndroidManifest.xml || true
-          find decoded-apk -type f -name '*.xml'  -exec sed -i 's/QGroundControl/Aeronics GCS/g' {} +
-          find decoded-apk -type f -name '*.qml'  -exec sed -i 's/QGroundControl/Aeronics GCS/g' {} +
+          set -eux
+          ICON=custom/res/images/aeronics_icon.png
+          LOGO=custom/res/images/aeronics_logo.png
 
-          # 2) Force label + icons in manifest
-          sed -i 's/android:label="[^"]*"/android:label="Aeronics GCS"/' decoded-apk/AndroidManifest.xml
-          if grep -q 'android:icon=' decoded-apk/AndroidManifest.xml; then
-            sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' decoded-apk/AndroidManifest.xml
-          else
-            sed -i 's#<application #<application android:icon="@mipmap/ic_launcher" #' decoded-apk/AndroidManifest.xml
-          fi
-          if grep -q 'android:roundIcon=' decoded-apk/AndroidManifest.xml; then
-            sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' decoded-apk/AndroidManifest.xml
-          else
-            sed -i 's#<application #<application android:roundIcon="@mipmap/ic_launcher_round" #' decoded-apk/AndroidManifest.xml
-          fi
+          # helper to write into every density folder that exists
+          write_icon () {
+            local src="$1"; shift
+            for d in work/res/mipmap-*/ work/res/drawable-*/ work/res/drawable*/ ; do
+              [ -d "$d" ] || continue
+              for name in ic_launcher.png ic_launcher_round.png ic_launcher_foreground.png ic_launcher_adaptive_fore.png app_icon.png qgc_app_icon.png qgc_icon.png ; do
+                if [ -f "$d/$name" ]; then
+                  echo "Replacing $d/$name"
+                  convert "$src" -resize 192x192\> "$d/$name"
+                fi
+              done
+            done
+          }
 
-          # 3) Adaptive icon XML (foreground from mipmap)
-          mkdir -p decoded-apk/res/mipmap-anydpi-v26
-          cat > decoded-apk/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
-          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-              <background android:drawable="@android:color/white"/>
-              <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
-          </adaptive-icon>
-          EOF
+          # launcher icons → Aeronics icon
+          write_icon "$ICON"
 
-          # 4) Generate mipmap sizes from Aeronics icon
-          mkdir -p decoded-apk/res/mipmap-mdpi decoded-apk/res/mipmap-hdpi decoded-apk/res/mipmap-xhdpi decoded-apk/res/mipmap-xxhdpi decoded-apk/res/mipmap-xxxhdpi
-          convert custom/res/images/aeronics_icon.png -resize 48x48   decoded-apk/res/mipmap-mdpi/ic_launcher.png
-          convert custom/res/images/aeronics_icon.png -resize 72x72   decoded-apk/res/mipmap-hdpi/ic_launcher.png
-          convert custom/res/images/aeronics_icon.png -resize 96x96   decoded-apk/res/mipmap-xhdpi/ic_launcher.png
-          convert custom/res/images/aeronics_icon.png -resize 144x144 decoded-apk/res/mipmap-xxhdpi/ic_launcher.png
-          convert custom/res/images/aeronics_icon.png -resize 192x192 decoded-apk/res/mipmap-xxxhdpi/ic_launcher.png
-
-          # Foreground image for adaptive icon (use same PNG)
-          cp custom/res/images/aeronics_icon.png decoded-apk/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
-
-          # Round icons (copy same pixels)
-          cp decoded-apk/res/mipmap-mdpi/ic_launcher.png   decoded-apk/res/mipmap-mdpi/ic_launcher_round.png
-          cp decoded-apk/res/mipmap-hdpi/ic_launcher.png   decoded-apk/res/mipmap-hdpi/ic_launcher_round.png
-          cp decoded-apk/res/mipmap-xhdpi/ic_launcher.png  decoded-apk/res/mipmap-xhdpi/ic_launcher_round.png
-          cp decoded-apk/res/mipmap-xxhdpi/ic_launcher.png decoded-apk/res/mipmap-xxhdpi/ic_launcher_round.png
-          cp decoded-apk/res/mipmap-xxxhdpi/ic_launcher.png decoded-apk/res/mipmap-xxxhdpi/ic_launcher_round.png
-
-          # 5) Replace Q logos inside the UI
-          for n in qgc_logo qgc_app_logo qgc_brand_logo qgc_logo_white logo; do
-            find decoded-apk/res -type f -regex ".*\(drawable\|mipmap\).*${n}.*\.png" -exec cp custom/res/images/aeronics_logo.png {} \; || true
+          # in‑app logos (menu/top-left/about, etc.) → Aeronics logo
+          for f in $(git -C work ls-files | grep -E '^res/.*/.*(qgc|qground|logo|about).*\.png$' || true); do
+            echo "Replacing work/$f"
+            convert "$LOGO" -resize 512x512\> "work/$f"
           done
 
-          # 6) Optional splash
+          # generic pass: if any PNG contains a purple Q logo name, overwrite with Aeronics logo
+          for f in $(find work/res -type f -name '*.png' | grep -iE 'logo|about|qgc|qground'); do
+            echo "Replacing $f"
+            convert "$LOGO" -resize 512x512\> "$f"
+          done
+
+          # Optional splash
           if [ -f custom/res/images/splash.png ]; then
-            mkdir -p decoded-apk/res/drawable
-            cp custom/res/images/splash.png decoded-apk/res/drawable/splash.png
+            for f in $(find work/res -type f -name '*splash*.png'); do
+              echo "Replacing splash $f"
+              convert custom/res/images/splash.png -resize 1080x1920\> "$f"
+            done
           fi
 
+      - name: Rename visible app name to Aeronics GCS
+        run: |
+          set -eux
+          # 1) values/strings.xml entries
+          find work/res -type f -name "strings.xml" -print0 | xargs -0 sed -i 's/QGroundControl/Aeronics GCS/g'
+          # 2) Any other xml or json resource text occurrences
+          find work -type f \( -name "*.xml" -o -name "*.json" -o -name "*.txt" \) -print0 | xargs -0 sed -i 's/QGroundControl/Aeronics GCS/g'
+          # 3) As a fallback, also scan smali (word-boundary to avoid touching package names)
+          find work/smali* -type f -name "*.smali" -print0 | xargs -0 sed -i 's/\bQGroundControl\b/Aeronics GCS/g' || true
+
+      # ---------- rebuild/sign ----------
       - name: Rebuild APK
-        run: ./apktool b decoded-apk -o aeronics-unsigned.apk
+        run: |
+          set -eux
+          apktool b work -o dist/aeronics-unsigned.apk
 
       - name: Zipalign
         run: |
-          "$BUILD_TOOLS/zipalign" -v -p 4 aeronics-unsigned.apk aeronics-aligned.apk
+          set -eux
+          "${BUILD_TOOLS}/zipalign" -f -p 4 dist/aeronics-unsigned.apk dist/aeronics-aligned.apk
 
-      - name: Make debug keystore
+      - name: Make debug keystore (if missing)
         run: |
-          keytool -genkeypair -alias androiddebugkey -keyalg RSA -validity 20000 -keystore debug.keystore -storepass android -keypass android -dname "CN=Aeronics, OU=GCS, O=Aeronics, L=, S=, C=US"
+          set -eux
+          if [ ! -f debug.keystore ]; then
+            keytool -genkey -noprompt -alias androiddebugkey -dname "CN=Android,O=Android,C=US" -keystore debug.keystore -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000
+          fi
 
       - name: Sign APK
         run: |
-          "$BUILD_TOOLS/apksigner" sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out Aeronics-GCS.apk aeronics-aligned.apk
-          "$BUILD_TOOLS/apksigner" verify Aeronics-GCS.apk
+          set -eux
+          "${BUILD_TOOLS}/apksigner" sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out dist/Aeronics-GCS.apk dist/aeronics-aligned.apk
+          "${BUILD_TOOLS}/apksigner" verify --print-certs dist/Aeronics-GCS.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: Aeronics-GCS-APK
-          path: Aeronics-GCS.apk
+          path: dist/Aeronics-GCS.apk
+          if-no-files-found: error
