@@ -1,162 +1,205 @@
-name: Rebrand QGroundControl to Aeronics GCS (from Release)
+name: Build Aeronics GCS from QGroundControl source (Android)
 
 on:
   workflow_dispatch:
-
-permissions:
-  contents: read
+    inputs:
+      qgc_tag:
+        description: "QGroundControl tag/commit to build"
+        required: false
+        type: string
+        default: "v5.0.6"
+      app_label:
+        description: "Visible app name"
+        required: false
+        type: string
+        default: "Aeronics GCS"
 
 jobs:
-  rebrand:
-    runs-on: ubuntu-latest
+  android:
+    runs-on: ubuntu-22.04
+
+    env:
+      # ---- Versions known to work for QGC 5.0.x ----
+      QT_VERSION: "6.5.3"
+      ANDROID_NDK_VERSION: "25.2.9519653"
+      ANDROID_API: "33"                # target/compile SDK
+      CMAKE_BUILD_TYPE: "Release"
+
+      # Branding files in THIS repository
+      ICON_FILE: "custom/res/images/aeronics_icon.png"
+      BRAND_LOGO: "custom/res/images/aeronics_logo.png"
+      SPLASH_FILE: "custom/res/images/splash.png"
 
     steps:
-      - name: Checkout repo
+      - name: Checkout branding repo (this)
         uses: actions/checkout@v4
 
-      - name: Install tools (Java, ImageMagick, jq)
+      - name: Verify required branding files exist
+        run: |
+          test -f "$ICON_FILE"    || { echo "Missing $ICON_FILE"; exit 1; }
+          test -f "$BRAND_LOGO"   || { echo "Missing $BRAND_LOGO"; exit 1; }
+          test -f "qgc_custom.qrc" || { echo "Missing qgc_custom.qrc"; exit 1; }
+          test -f "CustomPlugin.cc" || { echo "Missing CustomPlugin.cc"; exit 1; }
+
+      - name: Install base packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y openjdk-17-jre-headless imagemagick jq curl unzip
+          sudo apt-get install -y git ninja-build python3-pip unzip zip \
+                                  openjdk-17-jdk jq imagemagick
 
-      - name: Download apktool + uber-apk-signer
+      # ---- Install Qt for Android + host tools ----
+      - name: Install Qt (host) & (android) with NDK
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: "android"
+          modules: "qtshadertools"
+          archives: "android;wasm_32"
+          setup-python: false
+          tools: "tools_ifw,tools_qtcreator"
+          cached: true
+
+      - name: Setup Android SDK/NDK
         run: |
-          curl -sL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
-          echo '#!/usr/bin/env bash' > apktool
-          echo 'exec java -jar "$PWD/apktool.jar" "$@"' >> apktool
-          chmod +x apktool
-          curl -sL -o uber-apk-signer.jar https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar
+          echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$HOME/android-sdk" >> $GITHUB_ENV
+          mkdir -p $HOME/android-sdk/cmdline-tools
+          cd $HOME/android-sdk
+          curl -sSL -o cmdline-tools.zip \
+            https://dl.google.com/android/repository/commandlinetools-linux-10406996_latest.zip
+          unzip -q cmdline-tools.zip -d cmdline-tools
+          mv cmdline-tools/cmdline-tools cmdline-tools/latest
+          rm -f cmdline-tools.zip
+          echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "platforms;android-${{ env.ANDROID_API }}" "build-tools;34.0.0" "ndk;${{ env.ANDROID_NDK_VERSION }}"
+          echo "ANDROID_NDK_ROOT=$HOME/android-sdk/ndk/${{ env.ANDROID_NDK_VERSION }}" >> $GITHUB_ENV
+          echo "$HOME/android-sdk/platform-tools" >> $GITHUB_PATH
+          echo "$HOME/android-sdk/build-tools/34.0.0" >> $GITHUB_PATH
 
-      - name: Fetch base.apk from latest Release
-        env:
-          GH_REPO: ${{ github.repository }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # ---- Get QGroundControl source ----
+      - name: Clone QGroundControl
         run: |
-          set -euo pipefail
-          API="https://api.github.com/repos/${GH_REPO}/releases/latest"
-          ASSET_ID=$(curl -s -H "Authorization: Bearer ${GITHUB_TOKEN}" "$API" \
-            | jq -r '.assets[] | select(.name=="base.apk") | .id')
-          if [ -z "${ASSET_ID:-}" ] || [ "${ASSET_ID}" = "null" ]; then
-            echo "❌ No asset named base.apk on the latest release. Create a release and attach your original APK as base.apk."
-            exit 1
-          fi
-          curl -L -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-               -H "Accept: application/octet-stream" \
-               "https://api.github.com/repos/${GH_REPO}/releases/assets/${ASSET_ID}" \
-               -o base.apk
-          ls -lh base.apk
+          git clone --recursive https://github.com/mavlink/qgroundcontrol.git qgc
+          cd qgc
+          git checkout ${{ inputs.qgc_tag }}
+          git submodule update --init --recursive
 
-      - name: Verify branding images exist
+      # ---- Drop your custom folder into QGC and point CMake to it ----
+      - name: Inject custom branding & plugin
         run: |
-          set -e
-          test -s custom/res/images/aeronics_icon.png  || (echo "Missing custom/res/images/aeronics_icon.png" && exit 1)
-          test -s custom/res/images/aeronics_logo.png  || (echo "Missing custom/res/images/aeronics_logo.png" && exit 1)
-          [ -s custom/res/images/splash.png ] || echo "Note: splash.png not provided (optional)."
+          set -eux
+          # Copy your custom resources into QGC/custom
+          mkdir -p qgc/custom
+          cp -R custom qgc/
+          cp qgc_custom.qrc qgc/custom/
+          cp CustomPlugin.cc qgc/custom/
 
-      - name: Decode APK
-        run: |
-          ./apktool d -f -o decoded base.apk
-          ls -la decoded | sed -n '1,120p'
+          # Ensure your QRC is referenced by a tiny CMake shim
+          cat > qgc/custom/CMakeLists.txt <<'CMAKE'
+          add_library(qgc_custom STATIC
+            CustomPlugin.cc
+          )
+          target_include_directories(qgc_custom PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+          )
+          # Add overridden resources (images, etc.)
+          qt_add_resources(qgc_custom "custom_resources"
+            PREFIX "/custom"
+            FILES
+              ${CMAKE_CURRENT_SOURCE_DIR}/res/images/aeronics_logo.png
+              ${CMAKE_CURRENT_SOURCE_DIR}/res/images/aeronics_icon.png
+              ${CMAKE_CURRENT_SOURCE_DIR}/res/images/splash.png
+          )
+          target_link_libraries(qgc_custom PRIVATE Qt::Core)
+          set_property(TARGET qgc_custom PROPERTY POSITION_INDEPENDENT_CODE ON)
+          set(QGC_CUSTOM_BUILD ON PARENT_SCOPE)
+          set(QGC_CUSTOM_TARGET qgc_custom PARENT_SCOPE)
+          CMAKE
 
-      - name: Apply Aeronics branding (name, icons, in-app logos)
-        run: |
-          set -euxo pipefail
+          # Create a minimal header to register plugin (expected by QGC)
+          cat > qgc/custom/CustomPlugin.h <<'HPP'
+          #pragma once
+          #include "QGCCorePlugin.h"
+          class CustomPlugin : public QGCCorePlugin {
+              Q_OBJECT
+          public:
+              explicit CustomPlugin(QGCApplication* app, QGCToolbox* toolbox) : QGCCorePlugin(app, toolbox) {}
+          };
+          HPP
 
-          ICON="custom/res/images/aeronics_icon.png"
-          LOGO="custom/res/images/aeronics_logo.png"
-          SPLASH="custom/res/images/splash.png"
-          NEW_NAME="Aeronics GCS"
-
-          # 1) App name: strings + Manifest literal fallback
-          for f in $(find decoded/res -type f -name "strings.xml"); do
-            sed -i "s/>QGroundControl</>${NEW_NAME}</g" "$f" || true
-            sed -i "s/>Q Ground Control</>${NEW_NAME}</g" "$f" || true
-            sed -i "s/>QGC</>${NEW_NAME}</g" "$f" || true
-          done
-          sed -i 's/android:label="[^"]*"/android:label="Aeronics GCS"/' decoded/AndroidManifest.xml || true
-          sed -i "s/android:label='[^']*'/android:label='Aeronics GCS'/" decoded/AndroidManifest.xml || true
-
-          # 2) Force Manifest to use standard launcher icons
-          sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' decoded/AndroidManifest.xml || true
-          sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' decoded/AndroidManifest.xml || true
-
-          # 3) Adaptive icon XML → point to our bitmap
-          mkdir -p decoded/res/mipmap-anydpi-v26 decoded/res/drawable-nodpi
-          cp "$ICON" decoded/res/drawable-nodpi/aeronics_icon.png
-          cat > decoded/res/mipmap-anydpi-v26/ic_launcher.xml <<'XML'
-<?xml version="1.0" encoding="utf-8"?>
-<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-  <background android:drawable="@android:color/transparent"/>
-  <foreground>
-    <bitmap android:src="@drawable/aeronics_icon" android:gravity="center"/>
-  </foreground>
-</adaptive-icon>
-XML
-          cp decoded/res/mipmap-anydpi-v26/ic_launcher.xml decoded/res/mipmap-anydpi-v26/ic_launcher_round.xml
-
-          # 4) Legacy mipmap bitmaps (many launchers still read these)
-          mkdir -p decoded/res/mipmap-mdpi decoded/res/mipmap-hdpi decoded/res/mipmap-xhdpi decoded/res/mipmap-xxhdpi decoded/res/mipmap-xxxhdpi
-          convert "$ICON" -resize 48x48   decoded/res/mipmap-mdpi/ic_launcher.png
-          convert "$ICON" -resize 72x72   decoded/res/mipmap-hdpi/ic_launcher.png
-          convert "$ICON" -resize 96x96   decoded/res/mipmap-xhdpi/ic_launcher.png
-          convert "$ICON" -resize 144x144 decoded/res/mipmap-xxhdpi/ic_launcher.png
-          convert "$ICON" -resize 192x192 decoded/res/mipmap-xxxhdpi/ic_launcher.png
-          cp decoded/res/mipmap-mdpi/ic_launcher.png   decoded/res/mipmap-mdpi/ic_launcher_round.png
-          cp decoded/res/mipmap-hdpi/ic_launcher.png   decoded/res/mipmap-hdpi/ic_launcher_round.png
-          cp decoded/res/mipmap-xhdpi/ic_launcher.png  decoded/res/mipmap-xhdpi/ic_launcher_round.png
-          cp decoded/res/mipmap-xxhdpi/ic_launcher.png decoded/res/mipmap-xxhdpi/ic_launcher_round.png
-          cp decoded/res/mipmap-xxxhdpi/ic_launcher.png decoded/res/mipmap-xxxhdpi/ic_launcher_round.png
-
-          # 5) Replace in‑app logos (PNG/SVG) in res/ and assets/
-          find decoded -type f -iregex '.*\/\(res\|assets\)\/.*\(qgc\|qground\|logo\|brand\|about\).*\.\(png\|svg\)$' -print0 \
-            | while IFS= read -r -d '' p; do
-                echo "Replacing $p"
-                cp "$LOGO" "$p" || true
-              done
-
-          # 6) Optional: splash artwork
-          if [ -f "$SPLASH" ]; then
-            find decoded -type f -iregex '.*\/\(res\|assets\)\/.*splash.*\.png$' -print0 \
-              | while IFS= read -r -d '' p; do
-                  echo "Replacing splash $p"
-                  cp "$SPLASH" "$p" || true
-                done
+          # If your CustomPlugin.cc is empty, ensure it includes that header:
+          if ! grep -q "CustomPlugin.h" qgc/custom/CustomPlugin.cc; then
+            sed -i '1i #include "CustomPlugin.h"' qgc/custom/CustomPlugin.cc
           fi
 
-          # 7) Text inside QML/JS/JSON/TXT/XML under assets (UI labels)
-          if [ -d decoded/assets ]; then
-            find decoded/assets -type f -iregex '.*\.\(qml\|js\|json\|txt\|xml\|ini\)$' -print0 \
-              | xargs -0 -I{} sed -i "s/QGroundControl/${NEW_NAME}/g" "{}" || true
-            find decoded/assets -type f -iregex '.*\.\(qml\|js\|json\|txt\|xml\|ini\)$' -print0 \
-              | xargs -0 -I{} sed -i "s/\bQGC\b/${NEW_NAME}/g" "{}" || true
+      # ---- Replace Android launcher resources + app label inside QGC android template ----
+      - name: Apply Android launcher icon + app label
+        run: |
+          set -eux
+          cd qgc/android
+
+          # Put our icon into android res (vector/adaptive will be auto-generated as needed)
+          mkdir -p res/mipmap-anydpi-v26 res/drawable-nodpi
+          cp ../../${{ env.ICON_FILE }} res/drawable-nodpi/aeronics_icon.png
+
+          # Adaptive icon xml -> points to bitmap
+          cat > res/mipmap-anydpi-v26/ic_launcher.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+            <background android:drawable="@android:color/transparent"/>
+            <foreground>
+              <bitmap android:src="@drawable/aeronics_icon" android:gravity="center"/>
+            </foreground>
+          </adaptive-icon>
+          XML
+          cp res/mipmap-anydpi-v26/ic_launcher.xml res/mipmap-anydpi-v26/ic_launcher_round.xml
+
+          # Ensure manifest uses our resource names and our app label
+          sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' AndroidManifest.xml || true
+          sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' AndroidManifest.xml || true
+          sed -i 's/android:label="[^"]*"/android:label="${{ inputs.app_label }}"/' AndroidManifest.xml || true
+
+      # ---- Configure & build (CMake with Qt6 Android toolchain) ----
+      - name: Configure (CMake)
+        run: |
+          set -eux
+          cd qgc
+          cmake -S . -B build-android -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DANDROID=ON \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-${{ env.ANDROID_API }} \
+            -DQT_HOST_PATH="${{ env.Qt5_DIR:-$Qt6_DIR }}" \
+            -DQT_ANDROID_SDK_ROOT="$ANDROID_SDK_ROOT" \
+            -DQT_ANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" \
+            -DQGC_CUSTOM_BUILD=ON \
+            -DQGC_CUSTOM_DIRECTORY="${{ github.workspace }}/qgc/custom"
+
+      - name: Build
+        run: |
+          cmake --build qgc/build-android --parallel
+
+      - name: Package APK
+        run: |
+          set -eux
+          cd qgc/build-android
+          # Qt's plugin generates an android deploy target:
+          cmake --build . --target apk || true
+          # Find produced APK
+          APK=$(find . -type f -name "*.apk" | head -n1 || true)
+          if [ -z "$APK" ]; then
+            echo "APK not found; attempting gradle wrapper"
+            cd ../android
+            ./gradlew assembleRelease
+            APK=$(find . -type f -name "*release*.apk" | head -n1)
           fi
-
-      - name: Diagnostics (remaining Q references)
-        run: |
-          mkdir -p diag
-          (grep -RniE "QGroundControl|\\bQGC\\b" decoded || true) > diag/remaining_strings.txt
-          (cd decoded && find res assets -type f -iregex '.*\(qgc\|qground\|logo\|brand\).*\.\(png\|svg\)' | sort) > diag/images_touched.txt
-
-      - name: Build with AAPT2 (more stable)
-        run: |
-          ./apktool b --use-aapt2 -o unsigned.apk decoded
-          ls -lh unsigned.apk
-
-      - name: Sign & align (uber-apk-signer)
-        run: |
-          java -jar uber-apk-signer.jar -a unsigned.apk -o out --allowResign
-          ls -la out
-          mv out/unsigned-aligned-signed.apk Aeronics-GCS.apk
-          ls -lh Aeronics-GCS.apk
+          echo "APK=$APK" >> $GITHUB_ENV
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Aeronics-GCS-APK
-          path: Aeronics-GCS.apk
-
-      - name: Upload diagnosis
-        uses: actions/upload-artifact@v4
-        with:
-          name: diagnosis
-          path: diag
+          name: Aeronics-GCS-from-source
+          path: ${{ env.APK }}
+          if-no-files-found: error
