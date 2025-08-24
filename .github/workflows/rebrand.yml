@@ -24,7 +24,7 @@ jobs:
           chmod +x apktool
           curl -L -o uber-apk-signer.jar https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar
 
-      - name: Download base APK from release
+      - name: Download base APK from your release
         run: |
           curl -L -o base.apk https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk
 
@@ -33,23 +33,74 @@ jobs:
           rm -rf work
           ./apktool d base.apk -o work -f
 
-      - name: Rename app to "Aeronics GCS"
+      # --- BRANDING SETUP ----------------------------------------------------
+      # Prefer branding/ folder; if missing, fall back to files in repo root.
+      - name: Prepare branding assets
+        run: |
+          set -e
+          mkdir -p branding
+          # If files exist in root, copy them into branding/ for consistency
+          [ -f icon.png ] && cp -f icon.png branding/icon.png || true
+          [ -f LogoLight.png ] && cp -f LogoLight.png branding/LogoLight.png || true
+          [ -f LogoDark.png ] && cp -f LogoDark.png branding/LogoDark.png || true
+
+          # Sanity check: at least icon.png must exist
+          if [ ! -f branding/icon.png ]; then
+            echo "ERROR: branding/icon.png not found. Upload branding/icon.png first."
+            exit 1
+          fi
+          # If LogoLight/Dark missing, reuse icon.png
+          [ -f branding/LogoLight.png ] || cp branding/icon.png branding/LogoLight.png
+          [ -f branding/LogoDark.png ] || cp branding/icon.png branding/LogoDark.png
+      # -----------------------------------------------------------------------
+
+      # Home-screen name (strings.xml)
+      - name: Rename app to Aeronics GCS (strings.xml)
         run: |
           if grep -Rql 'name="app_name"' work/res/values*; then
             sed -i 's#<string name="app_name">[^<]*</string>#<string name="app_name">Aeronics GCS</string>#g' work/res/values*/strings.xml || true
           fi
 
-      - name: Replace launcher icons
+      # Force label in AndroidManifest too
+      - name: Force app label in AndroidManifest
         run: |
-          for d in mipmap-hdpi mipmap-mdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
+          sed -i 's/android:label="[^"]*"/android:label="Aeronics GCS"/' work/AndroidManifest.xml || true
+
+      # Launcher icons (all densities)
+      - name: Replace launcher icons (mipmap)
+        run: |
+          for d in mipmap-mdpi mipmap-hdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
             mkdir -p work/res/$d
             cp branding/icon.png work/res/$d/ic_launcher.png || true
             cp branding/icon.png work/res/$d/ic_launcher_round.png || true
           done
+          # Adaptive icon foreground fallback
+          if [ -d work/res/mipmap-anydpi-v26 ]; then
+            cp branding/icon.png work/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
+          fi
 
-      - name: Try to replace splash logo (best-effort)
+      # In-app logos (toolbar/splash/about etc.)
+      - name: Replace QGC logos in resources
         run: |
+          # Common filenames seen in QGC builds
+          for f in \
+            LogoLight.png LogoDark.png logo.png qgcLogo.png qgc_logo.png splash.png \
+            qgcicon.png qgc_icon.png ic_qgc.png ; do
+            find work -type f -name "$f" -print -exec cp branding/LogoLight.png {} \; || true
+          done
+          # Any file with 'logo' in its name (png/svg)
+          find work -type f \( -iname "*logo*.png" -o -iname "*logo*.svg" \) -print -exec cp branding/LogoLight.png {} \; || true
+          # Best-effort splash
           find work/res -type f -iname "splash*.png" -exec cp branding/icon.png {} \; || true
+
+      # Replace visible app-name strings inside QML/JS
+      - name: Replace in-app text "QGroundControl" -> "Aeronics GCS"
+        run: |
+          # List matches (non-fatal if none)
+          grep -RIl --include="*.qml" --include="*.js" "QGroundControl" work || true
+          # Replace everywhere
+          grep -RIl --include="*.qml" --include="*.js" "QGroundControl" work \
+            | xargs -I{} sed -i 's/QGroundControl/Aeronics GCS/g' {} || true
 
       - name: Rebuild unsigned APK
         run: |
