@@ -58,6 +58,7 @@ jobs:
   </foreground>
 </adaptive-icon>
 EOF
+
           cp decoded/res/mipmap-anydpi-v26/ic_launcher.xml decoded/res/mipmap-anydpi-v26/ic_launcher_round.xml
 
           sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' decoded/AndroidManifest.xml || true
@@ -66,7 +67,6 @@ EOF
       - name: Replace Q logos inside menus
         run: |
           SRC_LOGO="custom/res/images/aeronics_logo.png"
-          # Replace any likely QGC logo PNGs in resources (menus, toolbar, about, etc.)
           find decoded -type f \( -iname "*qgc*.png" -o -iname "*qground*.png" -o -iname "logo*.png" -o -iname "toolbar*.png" -o -iname "brand*.png" \) | while read -r f; do
             SIZE=$(identify -format "%wx%h" "$f" 2>/dev/null || echo "")
             if [ -n "$SIZE" ]; then
@@ -92,19 +92,15 @@ EOF
 
       - name: Replace app text QGroundControl → Aeronics GCS
         run: |
-          # Generic rename everywhere (QML, XML, JS, etc.)
           grep -ril --exclude-dir=.git 'QGroundControl' decoded | xargs -r sed -i 's/QGroundControl/Aeronics GCS/g'
-          # Strings resource (if present)
           if [ -f decoded/res/values/strings.xml ]; then
             sed -i 's#<string name="app_name">.*</string>#<string name="app_name">Aeronics GCS</string>#' decoded/res/values/strings.xml || true
           fi
 
-      - name: Rename footer/version labels to Aeronics
+      - name: Rename footer/version labels
         run: |
-          # Make sure any visible "QGroundControl Version" footer or About text is Aeronics-branded
           grep -ril --exclude-dir=.git 'QGroundControl Version' decoded | xargs -r sed -i 's/QGroundControl Version/Aeronics GCS Version/g'
           grep -ril --exclude-dir=.git 'QGroundControl v' decoded       | xargs -r sed -i 's/QGroundControl v/Aeronics GCS v/g'
-          # Sometimes shown as "About QGroundControl"
           grep -ril --exclude-dir=.git 'About QGroundControl' decoded  | xargs -r sed -i 's/About QGroundControl/About Aeronics GCS/g'
 
       - name: Rebuild APK
@@ -113,7 +109,6 @@ EOF
 
       - name: Sign APK
         run: |
-          # Use default Android debug keystore (auto-created if missing)
           if [ ! -f ~/.android/debug.keystore ]; then
             mkdir -p ~/.android
             keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android -keypass android -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000
