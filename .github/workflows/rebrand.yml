@@ -4,30 +4,38 @@ on: { workflow_dispatch: {} }
 permissions: { contents: read }
 
 env:
+  # Your base APK (change only if needed)
   BASE_APK_URL: "https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk"
+
+  # Branding inputs in your repo
   ICON_FILE: "custom/res/images/aeronics_icon.png"
   LOGO_FILE: "custom/res/images/aeronics_logo.png"
   SPLASH_FILE: "custom/res/images/splash.png"
+
   NEW_APP_NAME: "Aeronics GCS"
 
 jobs:
   rebrand:
     runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Verify images exist
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify branding files
         run: |
           set -e
-          [ -s "$ICON_FILE" ] || { echo "Missing $ICON_FILE"; exit 1; }
-          [ -s "$LOGO_FILE" ] || { echo "Missing $LOGO_FILE"; exit 1; }
-          echo "Images OK"
+          [ -s "$ICON_FILE" ]  || { echo "Missing $ICON_FILE";  exit 1; }
+          [ -s "$LOGO_FILE" ]  || { echo "Missing $LOGO_FILE";  exit 1; }
+          echo "Branding images found."
 
       - name: Java & tools
         uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '17' }
+        with:
+          distribution: temurin
+          java-version: '17'
 
-      - name: Install CLI tools
+      - name: Install utilities
         run: |
           set -eux
           sudo apt-get update
@@ -40,88 +48,101 @@ jobs:
       - name: Download base APK
         run: |
           curl -L "$BASE_APK_URL" -o base.apk
-          aapt dump badging base.apk | head -n 40 || true
+          aapt dump badging base.apk | head -n 80 || true
 
-      - name: Decode
+      - name: Decode APK
         run: |
           java -jar apktool.jar d -f -o decoded-apk base.apk
 
-      - name: Replace app name (strings + manifest literal)
+      - name: Set app name (strings + literal fallback)
         run: |
           set -eux
+          # strings.xml in all locales
           for f in decoded-apk/res/values*/strings*.xml; do
             [ -f "$f" ] || continue
             sed -i 's/>QGroundControl</>'"$NEW_APP_NAME"'</g' "$f" || true
             sed -i 's/>Q Ground Control</>'"$NEW_APP_NAME"'</g' "$f" || true
             sed -i 's/>QGC</>'"$NEW_APP_NAME"'</g' "$f" || true
           done
-          if grep -q 'android:label="QGroundControl"' decoded-apk/AndroidManifest.xml; then
-            sed -i 's/android:label="QGroundControl"/android:label="'"$NEW_APP_NAME"'"/' decoded-apk/AndroidManifest.xml
-          fi
-          if grep -q "android:label='QGroundControl'" decoded-apk/AndroidManifest.xml; then
-            sed -i "s/android:label='QGroundControl'/android:label='${NEW_APP_NAME}'/" decoded-apk/AndroidManifest.xml
-          fi
+          # Manifest literals (rare but sometimes used)
+          sed -i 's/android:label="QGroundControl"/android:label="'"$NEW_APP_NAME"'"/g' decoded-apk/AndroidManifest.xml || true
+          sed -i "s/android:label='QGroundControl'/android:label='${NEW_APP_NAME}'/g" decoded-apk/AndroidManifest.xml || true
 
-      - name: Fix adaptive launcher icons (mipmap + xml)
+      - name: Force launcher icon (PNG + adaptive XML)
         run: |
           set -eux
-          # Replace bitmap payloads in all mipmap-* folders
+          # Overwrite every mipmap variant that exists
           for d in decoded-apk/res/mipmap-*; do
             [ -d "$d" ] || continue
-            for n in ic_launcher.png ic_launcher_round.png ic_launcher_foreground.png; do
+            for n in ic_launcher.png ic_launcher_round.png ic_launcher_foreground.png ic_launcher_monochrome.png; do
               [ -f "$d/$n" ] && cp "$ICON_FILE" "$d/$n" || true
             done
           done
-          # Force adaptive XMLs to use the bitmap (@mipmap/ic_launcher) as foreground
-          for x in decoded-apk/res/mipmap-anydpi-v26/ic_launcher*.xml; do
-            [ -f "$x" ] || continue
-            sed -i 's/android:foreground="@mipmap\/ic_launcher_foreground"/android:foreground="@mipmap\/ic_launcher"/' "$x" || true
-            sed -i 's/android:monochrome="[^"]*"/android:monochrome="@mipmap\/ic_launcher"/' "$x" || true
+          # Rewrite adaptive icon XMLs to use our bitmap as the foreground
+          mkdir -p decoded-apk/res/mipmap-anydpi-v26
+          for x in decoded-apk/res/mipmap-anydpi-v26/ic_launcher.xml decoded-apk/res/mipmap-anydpi-v26/ic_launcher_round.xml; do
+            cat > "$x" <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@android:color/transparent"/>
+    <foreground android:drawable="@mipmap/ic_launcher"/>
+</adaptive-icon>
+XML
           done
 
-      - name: Replace in-app PNG/SVG in res and assets
+      - name: Replace images in res/ and assets/
         run: |
           set -eux
-          # Replace typical brand/Logo/QGC images everywhere under res and assets
-          find decoded-apk -type f -iregex '.*\/\(res\|assets\)\/.*\(qgc\|logo\|brand\|appicon\|ic_.*q.*\).*\.\(png\|svg\)$' -print0 \
-            | while IFS= read -r -d '' p; do cp "$LOGO_FILE" "$p" || true; echo "Replaced $p"; done
-          # Splash (optional)
+          # Replace obvious brand files anywhere under res/ and assets/
+          find decoded-apk -type f -iregex '.*\/\(res\|assets\)\/.*\(qgc\|qground\|logo\|brand\|appicon\|ic_.*q.*\).*\.\(png\|svg\)$' -print0 \
+            | while IFS= read -r -d '' p; do
+                cp "$LOGO_FILE" "$p" || true
+                echo "Replaced: $p"
+              done
+          # Splash screens (optional)
           if [ -s "$SPLASH_FILE" ]; then
             find decoded-apk -type f -iregex '.*\/\(res\|assets\)\/.*splash.*\.png$' -print0 \
-              | while IFS= read -r -d '' p; do cp "$SPLASH_FILE" "$p" || true; echo "Replaced $p (splash)"; done
+              | while IFS= read -r -d '' p; do
+                  cp "$SPLASH_FILE" "$p" || true
+                  echo "Replaced splash: $p"
+                done
           fi
 
-      - name: Replace text inside QML, JS, JSON, TXT, XML in assets
+      - name: Replace “QGroundControl/QGC” text inside assets (QML/JS/JSON/XML/TXT)
         run: |
           set -eux
           if [ -d decoded-apk/assets ]; then
-            find decoded-apk/assets \
-              -type f -iregex '.*\.\(qml\|js\|json\|txt\|xml\)$' -print0 \
+            find decoded-apk/assets -type f -iregex '.*\.\(qml\|js\|json\|txt\|xml\|ini\)$' -print0 \
               | while IFS= read -r -d '' f; do
                   sed -i 's/QGroundControl/'"$NEW_APP_NAME"'/g' "$f" || true
                   sed -i 's/\bQGC\b/'"$NEW_APP_NAME"'/g' "$f" || true
                 done
           fi
 
-      - name: Diagnostics (find remaining Q references)
+      - name: Diagnostics (what still says Q…)
         run: |
           mkdir -p diag
           (grep -RniE "QGroundControl|\\bQGC\\b" decoded-apk || true) > diag/remaining_strings.txt
-          (cd decoded-apk && find res assets -type f -iregex '.*\(qgc\|logo\|brand\).*\.\(png\|svg\)' | sort) > diag/images_touched.txt
-          aapt dump badging base.apk   > diag/badging_before.txt || true
+          (cd decoded-apk && find res assets -type f -iregex '.*\(qgc\|qground\|logo\|brand\).*\.\(png\|svg\)' | sort) > diag/images_touched.txt
+          aapt dump badging base.apk  > diag/badging_before.txt || true
 
-      - name: Build
+      - name: Build + sign
         run: |
+          set -eux
           java -jar apktool.jar b -o unsigned.apk decoded-apk
           zipalign -p -f 4 unsigned.apk unsigned-aligned.apk || cp unsigned.apk unsigned-aligned.apk
           java -jar uber-apk-signer.jar --allowResign -a unsigned-aligned.apk --out signed
           aapt dump badging signed/*.apk > diag/badging_after.txt || true
           zip -r diagnosis.zip diag
 
-      - name: Upload APK
+      - name: APK
         uses: actions/upload-artifact@v4
-        with: { name: Aeronics-GCS-APK, path: signed/*.apk }
+        with:
+          name: Aeronics-GCS-APK
+          path: signed/*.apk
 
-      - name: Upload diagnosis
+      - name: Diagnosis
         uses: actions/upload-artifact@v4
-        with: { name: diagnosis, path: diagnosis.zip }
+        with:
+          name: diagnosis
+          path: diagnosis.zip
