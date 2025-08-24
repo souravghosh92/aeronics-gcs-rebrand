@@ -1,131 +1,58 @@
-name: Rebrand QGroundControl to Aeronics GCS (APK)
+name: Rebrand QGroundControl to Aeronics GCS
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
-env:
-  BASE_APK_URL: "https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk"
-  ICON_FILE: "custom/res/images/aeronics_icon.png"
-  LOGO_FILE: "custom/res/images/aeronics_logo.png"
-  SPLASH_FILE: "custom/res/images/splash.png"
-  NEW_APP_NAME: "Aeronics GCS"
-
 jobs:
   rebrand:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Verify branding files
+      - name: Install dependencies
         run: |
-          set -e
-          [ -s "$ICON_FILE" ]  || { echo "Missing $ICON_FILE";  exit 1; }
-          [ -s "$LOGO_FILE" ]  || { echo "Missing $LOGO_FILE";  exit 1; }
-          echo "Branding images found."
-
-      - name: Java & tools
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Install utilities
-        run: |
-          set -eux
           sudo apt-get update
-          sudo apt-get install -y imagemagick aapt zipalign jq libimage-exiftool-perl
+          sudo apt-get install -y default-jdk imagemagick zipalign aapt libimage-exiftool-perl
           curl -L -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
           curl -L -o apktool https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
           chmod +x apktool
           curl -L -o uber-apk-signer.jar https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar
 
-      - name: Download base APK
-        run: |
-          curl -L "$BASE_APK_URL" -o base.apk
-          aapt dump badging base.apk | head -n 50 || true
+      - name: Download Base APK
+        run: curl -L "https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk" -o base.apk
 
       - name: Decode APK
-        run: |
-          java -jar apktool.jar d -f -o decoded-apk base.apk
+        run: java -jar apktool.jar d -f -o decoded-apk base.apk
 
-      - name: Set app name
+      - name: Replace branding
         run: |
-          set -eux
-          for f in decoded-apk/res/values*/strings*.xml; do
-            [ -f "$f" ] || continue
-            sed -i 's/>QGroundControl</>'"$NEW_APP_NAME"'</g' "$f" || true
-            sed -i 's/>Q Ground Control</>'"$NEW_APP_NAME"'</g' "$f" || true
-            sed -i 's/>QGC</>'"$NEW_APP_NAME"'</g' "$f" || true
-          done
-          sed -i 's/android:label="QGroundControl"/android:label="'"$NEW_APP_NAME"'"/g' decoded-apk/AndroidManifest.xml || true
-          sed -i "s/android:label='QGroundControl'/android:label='${NEW_APP_NAME}'/g" decoded-apk/AndroidManifest.xml || true
+          # Change app name
+          sed -i 's/QGroundControl/Aeronics GCS/g' decoded-apk/AndroidManifest.xml || true
+          find decoded-apk/res -type f -name "*.xml" -exec sed -i 's/QGroundControl/Aeronics GCS/g' {} +
+          find decoded-apk/res -type f -name "*.xml" -exec sed -i 's/QGC/Aeronics GCS/g' {} +
 
-      - name: Force launcher icon
-        run: |
-          set -eux
+          # Replace icons
           for d in decoded-apk/res/mipmap-*; do
-            [ -d "$d" ] || continue
-            for n in ic_launcher.png ic_launcher_round.png ic_launcher_foreground.png ic_launcher_monochrome.png; do
-              [ -f "$d/$n" ] && cp "$ICON_FILE" "$d/$n" || true
-            done
-          done
-          mkdir -p decoded-apk/res/mipmap-anydpi-v26
-          for x in decoded-apk/res/mipmap-anydpi-v26/ic_launcher.xml decoded-apk/res/mipmap-anydpi-v26/ic_launcher_round.xml; do
-            cat > "$x" <<'XML'
-<?xml version="1.0" encoding="utf-8"?>
-<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@android:color/transparent"/>
-    <foreground android:drawable="@mipmap/ic_launcher"/>
-</adaptive-icon>
-XML
+            cp custom/res/images/aeronics_icon.png "$d/ic_launcher.png" || true
+            cp custom/res/images/aeronics_icon.png "$d/ic_launcher_round.png" || true
           done
 
-      - name: Replace images
-        run: |
-          set -eux
-          find decoded-apk -type f -iregex '.*\(res\|assets\).*\(qgc\|qground\|logo\|brand\).*\.\(png\|svg\)$' -print0 \
-            | while IFS= read -r -d '' p; do cp "$LOGO_FILE" "$p" || true; done
-          if [ -s "$SPLASH_FILE" ]; then
-            find decoded-apk -type f -iregex '.*splash.*\.png$' -print0 \
-              | while IFS= read -r -d '' p; do cp "$SPLASH_FILE" "$p" || true; done
-          fi
+          # Replace splash/logo if present
+          find decoded-apk -type f -iname "*splash*.png" -exec cp custom/res/images/splash.png {} \; || true
+          find decoded-apk -type f -iname "*logo*.png" -exec cp custom/res/images/aeronics_logo.png {} \; || true
 
-      - name: Replace text in assets
-        run: |
-          set -eux
-          if [ -d decoded-apk/assets ]; then
-            find decoded-apk/assets -type f -iregex '.*\.\(qml\|js\|json\|txt\|xml\|ini\)$' -print0 \
-              | while IFS= read -r -d '' f; do
-                  sed -i 's/QGroundControl/'"$NEW_APP_NAME"'/g' "$f" || true
-                  sed -i 's/\bQGC\b/'"$NEW_APP_NAME"'/g' "$f" || true
-                done
-          fi
+      - name: Rebuild APK
+        run: java -jar apktool.jar b decoded-apk -o unsigned.apk
 
-      - name: Diagnostics
+      - name: Align and Sign
         run: |
-          mkdir -p diag
-          (grep -RniE "QGroundControl|\\bQGC\\b" decoded-apk || true) > diag/remaining_strings.txt
-          (cd decoded-apk && find res assets -type f -iregex '.*\(qgc\|qground\|logo\|brand\).*\.\(png\|svg\)' | sort) > diag/images_touched.txt
-
-      - name: Build + sign
-        run: |
-          java -jar apktool.jar b -o unsigned.apk decoded-apk
-          zipalign -p -f 4 unsigned.apk unsigned-aligned.apk || cp unsigned.apk unsigned-aligned.apk
-          java -jar uber-apk-signer.jar --allowResign -a unsigned-aligned.apk --out signed
-          zip -r diagnosis.zip diag
+          zipalign -p -f 4 unsigned.apk aligned.apk
+          java -jar uber-apk-signer.jar --allowResign -a aligned.apk --out signed
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Aeronics-GCS-APK
           path: signed/*.apk
-
-      - name: Upload diagnosis
-        uses: actions/upload-artifact@v4
-        with:
-          name: diagnosis
-          path: diagnosis.zip
