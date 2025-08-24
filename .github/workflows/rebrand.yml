@@ -8,140 +8,92 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Android / build config
+      ANDROID_HOME: ${{ github.workspace }}/android-sdk
+      ANDROID_NDK_HOME: ${{ github.workspace }}/android-sdk/ndk/26.1.10909125
       ANDROID_API: "24"
-      ANDROID_BUILD_TOOLS: "34.0.0"
-      ANDROID_NDK_VERSION: "26.1.10909125"
       CMAKE_BUILD_TYPE: "Release"
-
-      # Qt config (Qt 6 for QGC v5)
       QT_VERSION: "6.5.3"
       QT_MODULES: "qtbase qtmultimedia qtdeclarative qtshadertools"
-
-      # QGC version tag/branch to build
       QGC_REF: "v5.0.6"
 
     steps:
-      # 0) Checkout THIS repo (your rebrand files live here)
       - name: Checkout rebrand repo
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      # 1) Install JDK (needed by Android/Gradle)
       - name: Install Java 17
         uses: actions/setup-java@v4
         with:
-          distribution: "temurin"
-          java-version: "17"
+          distribution: temurin
+          java-version: 17
 
-      # 2) Android SDK/NDK + accept licenses
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          api-level: ${{ env.ANDROID_API }}
-          build-tools: ${{ env.ANDROID_BUILD_TOOLS }}
-          ndk: ${{ env.ANDROID_NDK_VERSION }}
-
-      # 3) Install build tools (CMake + Ninja)
-      - name: Install CMake & Ninja
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build cmake patchelf
+          sudo apt-get install -y ninja-build cmake unzip
 
-      # 4) Install Qt 6 (Android)
+      - name: Install Android SDK & NDK
+        run: |
+          mkdir -p $ANDROID_HOME/cmdline-tools
+          cd $ANDROID_HOME/cmdline-tools
+          curl -Lo tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip tools.zip -d latest
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "platforms;android-${ANDROID_API}" \
+            "build-tools;34.0.0" \
+            "ndk;26.1.10909125" \
+            "platform-tools"
+
       - name: Install Qt (Android)
         uses: jurplel/install-qt-action@v3
         with:
           version: ${{ env.QT_VERSION }}
-          host: linux
           target: android
+          host: linux
           arch: android_arm64_v8a
           modules: ${{ env.QT_MODULES }}
-          setup-python: false
-          cache: true
 
-      # 5) Clone QGroundControl sources
       - name: Clone QGroundControl
         run: |
           git clone --depth=1 --branch "${QGC_REF}" https://github.com/mavlink/qgroundcontrol.git qgc
 
-      # 6) Inject your custom brand (icons, qrc, etc.)
-      - name: Copy custom branding into QGC
+      - name: Apply Aeronics branding
         run: |
-          set -eux
-          # Ensure QGC custom dir exists
           mkdir -p qgc/custom
-          # Copy everything from your repo's custom folder into QGC
           cp -R custom/* qgc/custom/
 
-          echo "Custom dir contents:"
-          find qgc/custom -maxdepth 2 -type f -print
-
-      # 7) Configure (CMake)
-      - name: Configure (CMake)
+      - name: Configure CMake
         run: |
-          set -eux
           cd qgc
-
-          # Android SDK/NDK env from the action
-          export ANDROID_SDK_ROOT="$ANDROID_SDK_ROOT"
-          export ANDROID_NDK_ROOT="$ANDROID_NDK_ROOT"
-
-          # Qt6_DIR is exported by install-qt-action; pass it to CMake
           cmake -S . -B build-android -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
             -DANDROID=ON \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-${{ env.ANDROID_API }} \
-            -DCMAKE_PREFIX_PATH="${{ env.Qt6_DIR }}" \
-            -DQT_ANDROID_SDK_ROOT="$ANDROID_SDK_ROOT" \
-            -DQT_ANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" \
+            -DQT_ANDROID_SDK_ROOT=$ANDROID_HOME \
+            -DQT_ANDROID_NDK_ROOT=$ANDROID_NDK_HOME \
             -DQGC_CUSTOM_BUILD=ON \
-            -DQGC_CUSTOM_DIRECTORY="${{ github.workspace }}/qgc/custom"
+            -DQGC_CUSTOM_DIRECTORY=${{ github.workspace }}/qgc/custom \
+            -DCMAKE_PREFIX_PATH="${{ env.Qt6_DIR }}"
 
-      # 8) Build APK (this triggers androiddeployqt via CMake)
-      - name: Build (APK)
+      - name: Build APK
         run: |
-          set -eux
           cd qgc
-          cmake --build build-android -j"$(nproc)"
-          # Some generators require explicit target:
-          cmake --build build-android --target apk -j"$(nproc)" || true
+          cmake --build build-android -j$(nproc) --target apk || cmake --build build-android -j$(nproc)
 
-      # 9) Locate resulting APK
       - name: Find APK
         id: find_apk
         run: |
-          set -eux
           cd qgc
-          # Common output locations (QGC cmake+androiddeployqt)
-          mapfile -t CANDIDATES < <(printf "%s\n" \
-            build-android/android-build/*-release.apk \
-            build-android/android-build/build/outputs/apk/release/*.apk \
-            build-android/android-build/build/outputs/apk/*/*.apk \
-            build-android/*.apk)
-
-          APK_PATH=""
-          for f in "${CANDIDATES[@]}"; do
-            if [ -f "$f" ]; then
-              APK_PATH="$f"
-              break
-            fi
-          done
-
-          if [ -z "$APK_PATH" ]; then
-            echo "No APK found. Listing tree:"
-            find build-android -maxdepth 5 -type f -name "*.apk" -print || true
+          APK=$(find build-android -type f -name "*.apk" | head -n1 || true)
+          if [ -z "$APK" ]; then
+            echo "No APK found!"
             exit 1
           fi
+          echo "apk=$APK" >> $GITHUB_OUTPUT
 
-          echo "apk=$APK_PATH" >> "$GITHUB_OUTPUT"
-
-      # 10) Upload artifact
-      - name: Upload Aeronics GCS APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Aeronics-GCS-APK
-          path: qgc/${{ steps.find_apk.outputs.apk }}
-          if-no-files-found: error
+          path: ${{ steps.find_apk.outputs.apk }}
