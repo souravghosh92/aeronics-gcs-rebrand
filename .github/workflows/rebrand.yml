@@ -1,5 +1,4 @@
 name: Rebrand QGroundControl to Aeronics GCS
-
 on:
   workflow_dispatch:
 
@@ -16,7 +15,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Download apktool & uber-apk-signer
+      - name: Get tools
         run: |
           curl -L -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
           curl -L -o uber-apk-signer.jar https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar
@@ -30,15 +29,12 @@ jobs:
           rm -rf work
           java -jar apktool.jar d base.apk -o work -f
 
-      # ---------------------- DIAGNOSTIC (Option 2) ---------------------------
+      # ---------- DIAGNOSIS (leave as-is and send me these files) -------------
       - name: Diagnose where logos & strings are
         run: |
           set -x
-          # Text references
           grep -RInEI "QGroundControl" work > hits.txt || true
-          # Likely logo/icon files
           find work -type f -iregex '.*\(logo\|qgc\|icon\).*\.\(png\|svg\)$' -print > images.txt || true
-          # Zip the decoded APK for reference
           (cd work && zip -r ../decoded-apk.zip .) || true
 
       - name: Upload diagnosis
@@ -49,80 +45,80 @@ jobs:
             hits.txt
             images.txt
             decoded-apk.zip
-      # -----------------------------------------------------------------------
+      # ------------------------------------------------------------------------
 
-      # ----------------------- BRANDING PREP ----------------------------------
       - name: Prepare branding assets
         run: |
           set -e
           mkdir -p branding
+          # Expect your assets at repo root: icon.png, LogoLight.png, LogoDark.png
           [ -f icon.png ] && cp -f icon.png branding/icon.png || true
           [ -f LogoLight.png ] && cp -f LogoLight.png branding/LogoLight.png || true
           [ -f LogoDark.png ] && cp -f LogoDark.png branding/LogoDark.png || true
-          if [ ! -f branding/icon.png ]; then
-            echo "ERROR: branding/icon.png missing. Add your 512x512 icon."; exit 1
-          fi
+          if [ ! -f branding/icon.png ]; then echo "branding/icon.png is required (512x512)."; exit 1; fi
           [ -f branding/LogoLight.png ] || cp branding/icon.png branding/LogoLight.png
           [ -f branding/LogoDark.png ] || cp branding/icon.png branding/LogoDark.png
-      # -----------------------------------------------------------------------
+          # Copy a neutral name we’ll reuse everywhere:
+          cp -f branding/LogoLight.png branding/aeronics_logo.png
 
-      # ----------------------- NAMES ------------------------------------------
-      - name: Rename to Aeronics GCS (strings.xml + Manifest)
+      - name: Rename app label
         run: |
           if grep -Rql 'name="app_name"' work/res/values*; then
             sed -i 's#<string name="app_name">[^<]*</string>#<string name="app_name">Aeronics GCS</string>#g' work/res/values*/strings.xml || true
           fi
           sed -i 's/android:label="[^"]*"/android:label="Aeronics GCS"/' work/AndroidManifest.xml || true
-      # -----------------------------------------------------------------------
 
-      # ----------------------- LAUNCHER ICONS ---------------------------------
-      - name: Replace launcher icons (mipmap + adaptive)
+      - name: Replace launcher icons
         run: |
           for d in mipmap-mdpi mipmap-hdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
-            mkdir -p work/res/$d
-            cp -f branding/icon.png work/res/$d/ic_launcher.png 2>/dev/null || true
-            cp -f branding/icon.png work/res/$d/ic_launcher_round.png 2>/dev/null || true
+            [ -d work/res/$d ] && cp -f branding/icon.png work/res/$d/ic_launcher.png || true
+            [ -d work/res/$d ] && cp -f branding/icon.png work/res/$d/ic_launcher_round.png || true
           done
           for d in drawable-anydpi-v26 drawable-v26 mipmap-anydpi-v26; do
-            if [ -d "work/res/$d" ]; then
-              cp -f branding/icon.png work/res/$d/ic_launcher_foreground.png 2>/dev/null || true
-              cp -f branding/icon.png work/res/$d/ic_launcher_background.png 2>/dev/null || true
+            if [ -d work/res/$d ]; then
+              cp -f branding/icon.png work/res/$d/ic_launcher_foreground.png || true
+              cp -f branding/icon.png work/res/$d/ic_launcher_background.png || true
             fi
           done
-          find work/res -type f -name "ic_launcher.xml" -print -exec \
-            sed -i 's|android:drawable=\"@[^"]*\"|android:drawable=\"@mipmap/ic_launcher\"|g' {} \; || true
-      # -----------------------------------------------------------------------
 
-      # ----------------------- BRUTE-FORCE LOGO OVERWRITE ---------------------
-      - name: Overwrite all logo/qgc images (brute-force)
+      # --------- ULTRA-BRUTE LOGO OVERWRITE + text replace --------------------
+      - name: Overwrite common QGC logos & splash
         run: |
-          # Any PNG/SVG with 'logo' or 'qgc' in filename anywhere
-          find work -type f -iregex '.*\(logo\|qgc\).*\.\(png\|svg\)$' -print \
-            -exec cp -f branding/LogoLight.png {} \; || true
-          # Common splash images -> use the round icon
+          set -x
+          # Specific common filenames we’ve seen in QGC 5.x builds
+          for n in qgcLogo.png qgclogo.png QGCLogo.png qgcAppIcon.png productIcon.png toolbarLogo.png appIcon.png AppIcon.png logo.png Logo.png; do
+            find work -type f -iname "$n" -print -exec cp -f branding/aeronics_logo.png {} \; || true
+          done
+          # Any file path that contains '/logo' or '/qgc' and ends with png/svg
+          find work -type f -iregex '.*/\(logo\|qgc\)[^/]*\.\(png\|svg\)$' -print \
+            -exec cp -f branding/aeronics_logo.png {} \; || true
+          # Splash images
           find work -type f -iregex '.*/splash[^/]*\.png$' -print \
             -exec cp -f branding/icon.png {} \; || true
-      # -----------------------------------------------------------------------
+          # Try 9-patch splash replacements if present
+          find work -type f -iregex '.*/splash[^/]*\.9\.png$' -print \
+            -exec cp -f branding/icon.png {} \; || true
 
-      # ----------------------- TEXT REPLACEMENTS ------------------------------
-      - name: Replace in‑app text "QGroundControl" -> "Aeronics GCS"
+      - name: Replace visible text in QML/JS
         run: |
-          for ext in qml js json txt; do
+          # Replace label text everywhere it appears in QML/JS/JSON
+          for ext in qml js json; do
             grep -RIl --include="*.${ext}" "QGroundControl" work 2>/dev/null \
               | xargs -r sed -i 's/QGroundControl/Aeronics GCS/g'
           done
-      # -----------------------------------------------------------------------
+          # Also many QGC screens literally print "QGroundControl Version"
+          grep -RIl --include="*.qml" "Version" work 2>/dev/null \
+            | xargs -r sed -i 's/QGroundControl Version/Aeronics GCS Version/g'
 
       - name: Rebuild unsigned APK
-        run: |
-          java -jar apktool.jar b work -o unsigned.apk
+        run: java -jar apktool.jar b work -o unsigned.apk
 
-      - name: Sign & align APK
+      - name: Sign & align
         run: |
           mkdir -p output
           java -jar uber-apk-signer.jar -a unsigned.apk -o output
 
-      - name: Upload artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Aeronics-GCS-APK
