@@ -1,23 +1,21 @@
 name: Rebrand QGroundControl to Aeronics GCS (APK)
-on: { workflow_dispatch: {} }
 
-permissions: { contents: read }
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
-  # Your base APK (change only if needed)
   BASE_APK_URL: "https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/1.0/QGroundControl.2.apk"
-
-  # Branding inputs in your repo
   ICON_FILE: "custom/res/images/aeronics_icon.png"
   LOGO_FILE: "custom/res/images/aeronics_logo.png"
   SPLASH_FILE: "custom/res/images/splash.png"
-
   NEW_APP_NAME: "Aeronics GCS"
 
 jobs:
   rebrand:
     runs-on: ubuntu-22.04
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,37 +46,33 @@ jobs:
       - name: Download base APK
         run: |
           curl -L "$BASE_APK_URL" -o base.apk
-          aapt dump badging base.apk | head -n 80 || true
+          aapt dump badging base.apk | head -n 50 || true
 
       - name: Decode APK
         run: |
           java -jar apktool.jar d -f -o decoded-apk base.apk
 
-      - name: Set app name (strings + literal fallback)
+      - name: Set app name
         run: |
           set -eux
-          # strings.xml in all locales
           for f in decoded-apk/res/values*/strings*.xml; do
             [ -f "$f" ] || continue
             sed -i 's/>QGroundControl</>'"$NEW_APP_NAME"'</g' "$f" || true
             sed -i 's/>Q Ground Control</>'"$NEW_APP_NAME"'</g' "$f" || true
             sed -i 's/>QGC</>'"$NEW_APP_NAME"'</g' "$f" || true
           done
-          # Manifest literals (rare but sometimes used)
           sed -i 's/android:label="QGroundControl"/android:label="'"$NEW_APP_NAME"'"/g' decoded-apk/AndroidManifest.xml || true
           sed -i "s/android:label='QGroundControl'/android:label='${NEW_APP_NAME}'/g" decoded-apk/AndroidManifest.xml || true
 
-      - name: Force launcher icon (PNG + adaptive XML)
+      - name: Force launcher icon
         run: |
           set -eux
-          # Overwrite every mipmap variant that exists
           for d in decoded-apk/res/mipmap-*; do
             [ -d "$d" ] || continue
             for n in ic_launcher.png ic_launcher_round.png ic_launcher_foreground.png ic_launcher_monochrome.png; do
               [ -f "$d/$n" ] && cp "$ICON_FILE" "$d/$n" || true
             done
           done
-          # Rewrite adaptive icon XMLs to use our bitmap as the foreground
           mkdir -p decoded-apk/res/mipmap-anydpi-v26
           for x in decoded-apk/res/mipmap-anydpi-v26/ic_launcher.xml decoded-apk/res/mipmap-anydpi-v26/ic_launcher_round.xml; do
             cat > "$x" <<'XML'
@@ -90,25 +84,17 @@ jobs:
 XML
           done
 
-      - name: Replace images in res/ and assets/
+      - name: Replace images
         run: |
           set -eux
-          # Replace obvious brand files anywhere under res/ and assets/
-          find decoded-apk -type f -iregex '.*\/\(res\|assets\)\/.*\(qgc\|qground\|logo\|brand\|appicon\|ic_.*q.*\).*\.\(png\|svg\)$' -print0 \
-            | while IFS= read -r -d '' p; do
-                cp "$LOGO_FILE" "$p" || true
-                echo "Replaced: $p"
-              done
-          # Splash screens (optional)
+          find decoded-apk -type f -iregex '.*\(res\|assets\).*\(qgc\|qground\|logo\|brand\).*\.\(png\|svg\)$' -print0 \
+            | while IFS= read -r -d '' p; do cp "$LOGO_FILE" "$p" || true; done
           if [ -s "$SPLASH_FILE" ]; then
-            find decoded-apk -type f -iregex '.*\/\(res\|assets\)\/.*splash.*\.png$' -print0 \
-              | while IFS= read -r -d '' p; do
-                  cp "$SPLASH_FILE" "$p" || true
-                  echo "Replaced splash: $p"
-                done
+            find decoded-apk -type f -iregex '.*splash.*\.png$' -print0 \
+              | while IFS= read -r -d '' p; do cp "$SPLASH_FILE" "$p" || true; done
           fi
 
-      - name: Replace “QGroundControl/QGC” text inside assets (QML/JS/JSON/XML/TXT)
+      - name: Replace text in assets
         run: |
           set -eux
           if [ -d decoded-apk/assets ]; then
@@ -119,29 +105,26 @@ XML
                 done
           fi
 
-      - name: Diagnostics (what still says Q…)
+      - name: Diagnostics
         run: |
           mkdir -p diag
           (grep -RniE "QGroundControl|\\bQGC\\b" decoded-apk || true) > diag/remaining_strings.txt
           (cd decoded-apk && find res assets -type f -iregex '.*\(qgc\|qground\|logo\|brand\).*\.\(png\|svg\)' | sort) > diag/images_touched.txt
-          aapt dump badging base.apk  > diag/badging_before.txt || true
 
       - name: Build + sign
         run: |
-          set -eux
           java -jar apktool.jar b -o unsigned.apk decoded-apk
           zipalign -p -f 4 unsigned.apk unsigned-aligned.apk || cp unsigned.apk unsigned-aligned.apk
           java -jar uber-apk-signer.jar --allowResign -a unsigned-aligned.apk --out signed
-          aapt dump badging signed/*.apk > diag/badging_after.txt || true
           zip -r diagnosis.zip diag
 
-      - name: APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Aeronics-GCS-APK
           path: signed/*.apk
 
-      - name: Diagnosis
+      - name: Upload diagnosis
         uses: actions/upload-artifact@v4
         with:
           name: diagnosis
