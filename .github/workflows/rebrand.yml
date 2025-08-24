@@ -11,10 +11,16 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v3
 
-      - name: Install dependencies
+      - name: Set up Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y openjdk-17-jdk imagemagick wget unzip python3
+          sudo apt-get install -y imagemagick wget unzip
           wget https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
           wget https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O apktool.jar
           chmod +x apktool
@@ -22,60 +28,48 @@ jobs:
 
       - name: Check required assets exist
         run: |
-          test -f branding/base.apk || (echo "Missing branding/base.apk" && exit 1)
-          test -f custom/res/images/aeronics_icon.png || (echo "Missing aeronics_icon.png" && exit 1)
+          if [ ! -f branding/base.apk ]; then
+            echo "Missing branding/base.apk"
+            exit 1
+          fi
+          if [ ! -f custom/res/images/aeronics_icon.png ]; then
+            echo "Missing custom/res/images/aeronics_icon.png"
+            exit 1
+          fi
 
       - name: Decode base APK
         run: |
-          mkdir -p decoded
-          apktool d branding/base.apk -o decoded --force
+          java -jar /usr/local/bin/apktool.jar d branding/base.apk -o decoded --force
 
-      - name: Replace branding
+      - name: Replace launcher + icons
         run: |
           ICON="custom/res/images/aeronics_icon.png"
-          APP_NAME="Aeronics GCS"
-
-          # Replace launcher label
-          sed -i 's/android:label="[^"]*"/android:label="'${APP_NAME}'"/' decoded/AndroidManifest.xml || true
-
-          # Replace icons in manifest
-          sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' decoded/AndroidManifest.xml || true
-          sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' decoded/AndroidManifest.xml || true
-
-          # Ensure dirs
-          mkdir -p decoded/res/mipmap-anydpi-v26 decoded/res/drawable-nodpi
-
-          # Copy our logo
           cp "$ICON" decoded/res/drawable-nodpi/aeronics_icon.png
-
-          # Adaptive icon XML
-          cat > decoded/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          mkdir -p decoded/res/mipmap-anydpi-v26
+          cat > decoded/res/mipmap-anydpi-v26/ic_launcher.xml <<'XML'
 <?xml version="1.0" encoding="utf-8"?>
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-  <background android:drawable="@android:color/transparent"/>
+  <background android:drawable="@android:color/white"/>
   <foreground>
     <bitmap android:src="@drawable/aeronics_icon" android:gravity="center"/>
   </foreground>
 </adaptive-icon>
-EOF
-
+XML
           cp decoded/res/mipmap-anydpi-v26/ic_launcher.xml decoded/res/mipmap-anydpi-v26/ic_launcher_round.xml
+
+      - name: Rename app
+        run: |
+          sed -i 's/QGroundControl/Aeronics GCS/g' decoded/res/values/strings.xml || true
 
       - name: Rebuild APK
         run: |
-          apktool b decoded -o Aeronics-GCS-unsigned.apk
-
-      - name: Zipalign APK
-        run: |
-          wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
-          unzip -q commandlinetools-linux-9477386_latest.zip -d android-tools
-          yes | android-tools/cmdline-tools/bin/sdkmanager --sdk_root=$PWD/android-tools "build-tools;34.0.0"
-          $PWD/android-tools/build-tools/34.0.0/zipalign -f 4 Aeronics-GCS-unsigned.apk Aeronics-GCS-aligned.apk
+          java -jar /usr/local/bin/apktool.jar b decoded -o Aeronics-GCS-unsigned.apk
 
       - name: Sign APK
         run: |
-          keytool -genkeypair -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -dname "CN=Aeronics, OU=Dev, O=Aeronics, L=Kolkata, S=WB, C=IN" -validity 20000 -keyalg RSA -keysize 2048
-          $PWD/android-tools/build-tools/34.0.0/apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out Aeronics-GCS.apk Aeronics-GCS-aligned.apk
+          jarsigner -keystore ~/.android/debug.keystore -storepass android -keypass android \
+            Aeronics-GCS-unsigned.apk androiddebugkey
+          zipalign -v 4 Aeronics-GCS-unsigned.apk Aeronics-GCS.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v3
