@@ -18,15 +18,15 @@ jobs:
         run: |
           set -e
           test -f branding/base.apk || (echo "Missing branding/base.apk" && exit 1)
-          test -f custom/res/images/aeronics_icon.png || (echo "Missing custom/res/images/aeronics_icon.png" && exit 1)
-          test -f custom/res/images/aeronics_logo.png || (echo "Missing custom/res/images/aeronics_logo.png" && exit 1)
+          test -f custom/res/images/aeronics_icon.png || (echo "Missing aeronics_icon.png" && exit 1)
+          test -f custom/res/images/aeronics_logo.png || (echo "Missing aeronics_logo.png" && exit 1)
 
       - name: Install Java & ImageMagick
         run: |
           sudo apt-get update
           sudo apt-get install -y openjdk-17-jre-headless imagemagick unzip wget
 
-      - name: Install Android cmdline-tools & build-tools
+      - name: Install Android SDK
         run: |
           set -eux
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
@@ -36,7 +36,7 @@ jobs:
           rm clt.zip
           mv cmdline-tools latest || true
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
-          yes | sdkmanager --licenses > /dev/null
+          yes | sdkmanager --licenses
           sdkmanager "platforms;android-34" "build-tools;${BUILD_TOOLS}"
           echo "PATH=$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS}:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH" >> $GITHUB_ENV
 
@@ -50,17 +50,14 @@ jobs:
           chmod +x apktool
 
       - name: Decode base APK
-        run: |
-          set -eux
-          ./apktool d -f -o decoded branding/base.apk
+        run: ./apktool d -f -o decoded branding/base.apk
 
-      - name: Apply Aeronics launcher icon
+      - name: Replace launcher icon
         run: |
           set -eux
           ICON="custom/res/images/aeronics_icon.png"
           mkdir -p decoded/res/mipmap-anydpi-v26 decoded/res/drawable-nodpi
           cp "$ICON" decoded/res/drawable-nodpi/aeronics_icon.png
-
           cat > decoded/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOL'
 <?xml version="1.0" encoding="utf-8"?>
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
@@ -71,70 +68,54 @@ jobs:
 </adaptive-icon>
 EOL
           cp decoded/res/mipmap-anydpi-v26/ic_launcher.xml decoded/res/mipmap-anydpi-v26/ic_launcher_round.xml
-
           sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' decoded/AndroidManifest.xml || true
           sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' decoded/AndroidManifest.xml || true
 
-      - name: Replace in-app Q logos (.png + .webp)
+      - name: Replace in-app Q logos
         run: |
           set -eux
           SRC="custom/res/images/aeronics_logo.png"
-          mapfile -t TARGETS < <(find decoded/res -type f \( \
-             -iregex '.*\(qgc\|qground\).*\.png' -o \
-             -iregex '.*logo.*\.png'              -o \
-             -iregex '.*about.*\.png'             -o \
-             -iregex '.*\(qgc\|qground\).*\.webp' -o \
-             -iregex '.*logo.*\.webp'             -o \
-             -iregex '.*about.*\.webp' \))
-          echo "Found ${#TARGETS[@]} candidate images"
+          mapfile -t TARGETS < <(find decoded/res -type f -iregex '.*\(qgc\|qground\|logo\|about\).*\.\(png\|webp\)')
           for f in "${TARGETS[@]}"; do
             ext="${f##*.}"
             W=$(identify -format "%w" "$f" 2>/dev/null || echo 0)
             H=$(identify -format "%h" "$f" 2>/dev/null || echo 0)
             if [ "$W" -gt 0 ] && [ "$H" -gt 0 ]; then
-              if [[ "$ext" =~ [Ww][Ee][Bb][Pp] ]]; then
-                convert "$SRC" -resize "${W}x${H}" "tmp.webp"
-                mv -f "tmp.webp" "$f"
+              if [[ "$ext" == "webp" ]]; then
+                convert "$SRC" -resize "${W}x${H}" tmp.webp && mv tmp.webp "$f"
               else
                 convert "$SRC" -resize "${W}x${H}" "$f"
               fi
             else
-              if [[ "$ext" =~ [Ww][Ee][Bb][Pp] ]]; then
-                convert "$SRC" "tmp.webp" && mv -f "tmp.webp" "$f"
-              else
-                cp "$SRC" "$f"
-              fi
+              cp "$SRC" "$f"
             fi
           done
 
-      - name: Rename visible app strings
+      - name: Rename visible strings
         run: |
-          set -eux
-          find decoded/res -type f -path '*/values*/strings.xml' -print0 | while IFS= read -r -d '' s; do
+          find decoded/res -type f -name "strings.xml" -print0 | while IFS= read -r -d '' s; do
             sed -i 's/QGroundControl/Aeronics GCS/g' "$s" || true
             sed -i 's/\bQGC\b/Aeronics GCS/g' "$s" || true
           done
 
       - name: Rebuild APK
-        run: |
-          set -eux
-          ./apktool b decoded -o unsigned.apk
+        run: ./apktool b decoded -o unsigned.apk
 
       - name: Zipalign
-        run: |
-          set -eux
-          zipalign -f -p 4 unsigned.apk aligned.apk
+        run: zipalign -f -p 4 unsigned.apk aligned.apk
 
       - name: Sign APK
         run: |
-          set -eux
           KEYSTORE=debug.keystore
           KEYALIAS=androiddebugkey
           KEYPASS=android
           if [ ! -f "$KEYSTORE" ]; then
-            keytool -genkeypair -keystore "$KEYSTORE" -storepass "$KEYPASS" -alias "$KEYALIAS" -keypass "$KEYPASS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+            keytool -genkeypair -keystore "$KEYSTORE" -storepass "$KEYPASS" \
+              -alias "$KEYALIAS" -keypass "$KEYPASS" -keyalg RSA -keysize 2048 \
+              -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
-          apksigner sign --ks "$KEYSTORE" --ks-pass pass:$KEYPASS --key-pass pass:$KEYPASS --out Aeronics-GCS.apk aligned.apk
+          apksigner sign --ks "$KEYSTORE" --ks-pass pass:$KEYPASS --key-pass pass:$KEYPASS \
+            --out Aeronics-GCS.apk aligned.apk
           apksigner verify --verbose Aeronics-GCS.apk
 
       - name: Upload rebranded APK
