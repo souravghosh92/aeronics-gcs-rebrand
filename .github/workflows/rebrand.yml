@@ -33,20 +33,19 @@ jobs:
           cd "$ANDROID_SDK_ROOT/cmdline-tools"
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O clt.zip
           unzip -q clt.zip
-          rm clt.zip
+          rm -f clt.zip
           mv cmdline-tools latest || true
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
           yes | sdkmanager --licenses
           sdkmanager "platforms;android-34" "build-tools;${BUILD_TOOLS}"
-          echo "PATH=$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS}:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH" >> $GITHUB_ENV
+          echo "PATH=$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS}:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH" >> "$GITHUB_ENV"
 
       - name: Install apktool
         run: |
           set -eux
           APKTOOL_VER=2.9.3
           wget -q https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VER}/apktool_${APKTOOL_VER}.jar -O apktool.jar
-          echo '#!/usr/bin/env bash' > apktool
-          echo 'java -jar "$(dirname "$0")/apktool.jar" "$@"' >> apktool
+          printf '%s\n' '#!/usr/bin/env bash' 'exec java -jar "$(dirname "$0")/apktool.jar" "$@"' > apktool
           chmod +x apktool
 
       - name: Decode base APK
@@ -58,23 +57,24 @@ jobs:
           ICON="custom/res/images/aeronics_icon.png"
           mkdir -p decoded/res/mipmap-anydpi-v26 decoded/res/drawable-nodpi
           cp "$ICON" decoded/res/drawable-nodpi/aeronics_icon.png
-          cat > decoded/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-  <background android:drawable="@android:color/white"/>
-  <foreground>
-    <bitmap android:src="@drawable/aeronics_icon" android:gravity="center"/>
-  </foreground>
-</adaptive-icon>
-EOF
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="utf-8"?>' \
+            '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
+            '  <background android:drawable="@android:color/white"/>' \
+            '  <foreground>' \
+            '    <bitmap android:src="@drawable/aeronics_icon" android:gravity="center"/>' \
+            '  </foreground>' \
+            '</adaptive-icon>' \
+            > decoded/res/mipmap-anydpi-v26/ic_launcher.xml
           cp decoded/res/mipmap-anydpi-v26/ic_launcher.xml decoded/res/mipmap-anydpi-v26/ic_launcher_round.xml
           sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' decoded/AndroidManifest.xml || true
           sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' decoded/AndroidManifest.xml || true
 
-      - name: Replace in-app Q logos
+      - name: Replace in-app Q logos (menus, about, etc.)
         run: |
           set -eux
           SRC="custom/res/images/aeronics_logo.png"
+          # find likely Q/Logo assets (both png and webp)
           mapfile -t TARGETS < <(find decoded/res -type f -iregex '.*\(qgc\|qground\|logo\|about\).*\.\(png\|webp\)')
           for f in "${TARGETS[@]}"; do
             ext="${f##*.}"
@@ -82,7 +82,7 @@ EOF
             H=$(identify -format "%h" "$f" 2>/dev/null || echo 0)
             if [ "$W" -gt 0 ] && [ "$H" -gt 0 ]; then
               if [[ "$ext" == "webp" ]]; then
-                convert "$SRC" -resize "${W}x${H}" tmp.webp && mv tmp.webp "$f"
+                convert "$SRC" -resize "${W}x${H}" tmp.webp && mv -f tmp.webp "$f"
               else
                 convert "$SRC" -resize "${W}x${H}" "$f"
               fi
