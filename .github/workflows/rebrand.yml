@@ -58,7 +58,7 @@ jobs:
           ICON="custom/res/images/aeronics_icon.png"
           mkdir -p decoded/res/mipmap-anydpi-v26 decoded/res/drawable-nodpi
           cp "$ICON" decoded/res/drawable-nodpi/aeronics_icon.png
-          cat > decoded/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOL'
+          cat > decoded/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
 <?xml version="1.0" encoding="utf-8"?>
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
   <background android:drawable="@android:color/white"/>
@@ -66,7 +66,7 @@ jobs:
     <bitmap android:src="@drawable/aeronics_icon" android:gravity="center"/>
   </foreground>
 </adaptive-icon>
-EOL
+EOF
           cp decoded/res/mipmap-anydpi-v26/ic_launcher.xml decoded/res/mipmap-anydpi-v26/ic_launcher_round.xml
           sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' decoded/AndroidManifest.xml || true
           sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' decoded/AndroidManifest.xml || true
