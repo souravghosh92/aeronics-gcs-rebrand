@@ -79,8 +79,6 @@ EOL
         run: |
           set -eux
           SRC="custom/res/images/aeronics_logo.png"
-
-          # Find likely QGC logos in png or webp
           mapfile -t TARGETS < <(find decoded/res -type f \( \
              -iregex '.*\(qgc\|qground\).*\.png' -o \
              -iregex '.*logo.*\.png'              -o \
@@ -88,22 +86,20 @@ EOL
              -iregex '.*\(qgc\|qground\).*\.webp' -o \
              -iregex '.*logo.*\.webp'             -o \
              -iregex '.*about.*\.webp' \))
-
           echo "Found ${#TARGETS[@]} candidate images"
           for f in "${TARGETS[@]}"; do
             ext="${f##*.}"
             W=$(identify -format "%w" "$f" 2>/dev/null || echo 0)
             H=$(identify -format "%h" "$f" 2>/dev/null || echo 0)
             if [ "$W" -gt 0 ] && [ "$H" -gt 0 ]; then
-              if [ "$ext" = "webp" ] || [ "$ext" = "WEBP" ]; then
+              if [[ "$ext" =~ [Ww][Ee][Bb][Pp] ]]; then
                 convert "$SRC" -resize "${W}x${H}" "tmp.webp"
                 mv -f "tmp.webp" "$f"
               else
                 convert "$SRC" -resize "${W}x${H}" "$f"
               fi
             else
-              # Fallback: just overwrite (format-aware)
-              if [ "$ext" = "webp" ] || [ "$ext" = "WEBP" ]; then
+              if [[ "$ext" =~ [Ww][Ee][Bb][Pp] ]]; then
                 convert "$SRC" "tmp.webp" && mv -f "tmp.webp" "$f"
               else
                 cp "$SRC" "$f"
