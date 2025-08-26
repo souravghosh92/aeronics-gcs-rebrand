@@ -29,12 +29,11 @@ jobs:
       - name: Install Android cmdline-tools & build-tools
         run: |
           set -eux
-          mkdir -p "$ANDROID_SDK_ROOT"/cmdline-tools
-          cd "$ANDROID_SDK_ROOT"/cmdline-tools
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          cd "$ANDROID_SDK_ROOT/cmdline-tools"
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O clt.zip
           unzip -q clt.zip
           rm clt.zip
-          # Move to "latest" folder as sdkmanager expects
           mv cmdline-tools latest || true
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
           yes | sdkmanager --licenses > /dev/null
@@ -46,7 +45,8 @@ jobs:
           set -eux
           APKTOOL_VER=2.9.3
           wget -q https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VER}/apktool_${APKTOOL_VER}.jar -O apktool.jar
-          echo -e '#!/usr/bin/env bash\njava -jar "$(dirname "$0")/apktool.jar" "$@"' > apktool
+          echo '#!/usr/bin/env bash' > apktool
+          echo 'java -jar "$(dirname "$0")/apktool.jar" "$@"' >> apktool
           chmod +x apktool
 
       - name: Decode base APK
@@ -61,7 +61,6 @@ jobs:
           mkdir -p decoded/res/mipmap-anydpi-v26 decoded/res/drawable-nodpi
           cp "$ICON" decoded/res/drawable-nodpi/aeronics_icon.png
 
-          # Adaptive icon definitions
           cat > decoded/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOL'
 <?xml version="1.0" encoding="utf-8"?>
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
@@ -73,40 +72,51 @@ jobs:
 EOL
           cp decoded/res/mipmap-anydpi-v26/ic_launcher.xml decoded/res/mipmap-anydpi-v26/ic_launcher_round.xml
 
-          # Point manifest to new launcher icons (ignore if attributes absent)
           sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' decoded/AndroidManifest.xml || true
           sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' decoded/AndroidManifest.xml || true
 
-      - name: Replace in-app Q logos with Aeronics logo
+      - name: Replace in-app Q logos (.png + .webp)
         run: |
           set -eux
           SRC="custom/res/images/aeronics_logo.png"
-          # Common QGC asset name patterns
+
+          # Find likely QGC logos in png or webp
           mapfile -t TARGETS < <(find decoded/res -type f \( \
-            -iname '*qgc*.png' -o -iname '*qground*.png' -o -iname 'logo*.png' -o -iname 'about*.png' \
-          \))
-          echo "Found ${#TARGETS[@]} candidate image(s) to replace."
+             -iregex '.*\(qgc\|qground\).*\.png' -o \
+             -iregex '.*logo.*\.png'              -o \
+             -iregex '.*about.*\.png'             -o \
+             -iregex '.*\(qgc\|qground\).*\.webp' -o \
+             -iregex '.*logo.*\.webp'             -o \
+             -iregex '.*about.*\.webp' \))
+
+          echo "Found ${#TARGETS[@]} candidate images"
           for f in "${TARGETS[@]}"; do
-            # Keep target dimensions
-            W=$(identify -format "%w" "$f" || echo 0)
-            H=$(identify -format "%h" "$f" || echo 0)
+            ext="${f##*.}"
+            W=$(identify -format "%w" "$f" 2>/dev/null || echo 0)
+            H=$(identify -format "%h" "$f" 2>/dev/null || echo 0)
             if [ "$W" -gt 0 ] && [ "$H" -gt 0 ]; then
-              convert "$SRC" -resize "${W}x${H}" "$f"
-              echo "Replaced $f with ${W}x${H}"
+              if [ "$ext" = "webp" ] || [ "$ext" = "WEBP" ]; then
+                convert "$SRC" -resize "${W}x${H}" "tmp.webp"
+                mv -f "tmp.webp" "$f"
+              else
+                convert "$SRC" -resize "${W}x${H}" "$f"
+              fi
             else
-              # Fallback: just copy if identify failed
-              cp "$SRC" "$f"
-              echo "Replaced (no resize) $f"
+              # Fallback: just overwrite (format-aware)
+              if [ "$ext" = "webp" ] || [ "$ext" = "WEBP" ]; then
+                convert "$SRC" "tmp.webp" && mv -f "tmp.webp" "$f"
+              else
+                cp "$SRC" "$f"
+              fi
             fi
           done
 
-      - name: Rename visible app name strings → Aeronics GCS
+      - name: Rename visible app strings
         run: |
           set -eux
-          # Replace in all values*/strings.xml
           find decoded/res -type f -path '*/values*/strings.xml' -print0 | while IFS= read -r -d '' s; do
             sed -i 's/QGroundControl/Aeronics GCS/g' "$s" || true
-            sed -i 's/QGC/Aeronics GCS/g' "$s" || true
+            sed -i 's/\bQGC\b/Aeronics GCS/g' "$s" || true
           done
 
       - name: Rebuild APK
@@ -119,7 +129,7 @@ EOL
           set -eux
           zipalign -f -p 4 unsigned.apk aligned.apk
 
-      - name: Sign APK (debug)
+      - name: Sign APK
         run: |
           set -eux
           KEYSTORE=debug.keystore
