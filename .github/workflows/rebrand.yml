@@ -1,114 +1,89 @@
-name: Rebrand Aeronics GCS (with overrides)
+name: Rebrand Aeronics GCS
 
 on:
   workflow_dispatch:
-    inputs:
-      APP_NAME:
-        description: "Visible app name"
-        default: "Aeronics GCS"
 
 jobs:
   rebrand:
     runs-on: ubuntu-latest
-    env:
-      APP_NAME: ${{ github.event.inputs.APP_NAME }}
-      ICON: branding/aeronics_icon_512.png
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # 1. Download base.apk from your release (tag: Base.apk)
-      - name: Download base.apk from release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          mkdir -p work && cd work
-          gh release download "Base.apk" --repo "$GITHUB_REPOSITORY" --pattern "base.apk" --clobber
-          test -f base.apk || { echo "::error ::No base.apk found in release tag Base.apk"; exit 1; }
-          mv base.apk qgc.apk
-          ls -lh qgc.apk
-
-      # 2. Setup apktool + tools
       - name: Setup tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y default-jre zipalign apksigner imagemagick curl
-          mkdir -p $HOME/bin
-          curl -L -o $HOME/bin/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
-          printf '#!/usr/bin/env bash\nexec java -jar $HOME/bin/apktool.jar "$@"\n' > $HOME/bin/apktool
-          chmod +x $HOME/bin/apktool
-          echo "$HOME/bin" >> $GITHUB_PATH
-      - name: Verify apktool
-        run: apktool --version
+          sudo apt-get install -y default-jdk zipalign imagemagick
+          curl -L https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -o apktool.jar
+          echo 'java -jar $PWD/apktool.jar "$@"' > apktool
+          chmod +x apktool
+          sudo mv apktool apktool.jar /usr/local/bin/
 
-      # 3. Decode APK
+      - name: Download Base APK
+        run: |
+          mkdir -p work
+          cd work
+          curl -L https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/Base.apk/base.apk -o base.apk
+
       - name: Decode APK
-        run: cd work && apktool d -f -o decoded qgc.apk
-
-      # 4. Update manifest (app name + native libs)
-      - name: Update manifest
-        run: |
-          cd work/decoded
-          if grep -q 'android:label=' AndroidManifest.xml; then
-            sed -i 's#android:label="[^"]*"#android:label="'"$APP_NAME"'"#' AndroidManifest.xml
-          else
-            sed -i 's#<application #<application android:label="'"$APP_NAME"'" #' AndroidManifest.xml
-          fi
-          if grep -q 'android:extractNativeLibs=' AndroidManifest.xml; then
-            sed -i 's#android:extractNativeLibs="[^"]*"#android:extractNativeLibs="true"#' AndroidManifest.xml
-          else
-            sed -i 's#<application #<application android:extractNativeLibs="true" #' AndroidManifest.xml
-          fi
-
-      # 5. Replace launcher icons
-      - name: Replace launcher icons
-        run: |
-          cd work/decoded
-          if [ ! -f "$GITHUB_WORKSPACE/$ICON" ]; then
-            echo "::error ::Missing branding/aeronics_icon_512.png (upload 512x512 PNG)"; exit 1
-          fi
-          mapfile -t files < <(find res -type f -name "ic_launcher*.png" | sort)
-          for f in "${files[@]}"; do
-            sz=$(identify -format "%wx%h" "$f" 2>/dev/null || echo "192x192")
-            echo "Overwriting $f with $sz"
-            convert "$GITHUB_WORKSPACE/$ICON" -resize "$sz" "$f"
-          done
-
-      # 6. Apply overrides (your Aeronics logos)
-      - name: Apply overrides from branding/overrides
-        run: |
-          cd work/decoded
-          SRC="$GITHUB_WORKSPACE/branding/overrides"
-          if [ -d "$SRC" ]; then
-            echo "Applying overrides from $SRC"
-            while IFS= read -r -d '' f; do
-              rel="${f#"$SRC/"}"
-              if [ -f "$rel" ]; then
-                cp -f "$f" "$rel"
-                echo "Override applied: $rel"
-              fi
-            done < <(find "$SRC" -type f -print0)
-          else
-            echo "No branding/overrides directory."
-          fi
-
-      # 7. Build & sign
-      - name: Build
-        run: cd work && apktool b decoded -o Aeronics-GCS-unsigned.apk
-      - name: Align & Sign
         run: |
           cd work
-          zipalign -f 4 Aeronics-GCS-unsigned.apk Aeronics-GCS-aligned.apk
-          keytool -genkey -v -keystore debug.keystore -storepass android \
-            -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Aeronics,O=Aeronics"
-          apksigner sign --ks debug.keystore --ks-pass pass:android \
-            --key-pass pass:android --out Aeronics-GCS.apk Aeronics-GCS-aligned.apk
-          apksigner verify Aeronics-GCS.apk
+          apktool d -f base.apk -o decoded
 
-      # 8. Upload final APK
-      - uses: actions/upload-artifact@v4
+      - name: Update manifest (App name)
+        run: |
+          sed -i 's/android:label="[^"]*"/android:label="Aeronics GCS"/' work/decoded/AndroidManifest.xml
+
+      - name: Replace launcher icon
+        run: |
+          cd work/decoded
+          mkdir -p res/mipmap-anydpi-v26
+          cp ../../branding/aeronics_icon_512.png res/mipmap-anydpi-v26/ic_launcher.png
+          cp ../../branding/aeronics_icon_512.png res/mipmap-anydpi-v26/ic_launcher_round.png
+
+      - name: Apply overrides
+        run: |
+          cp -r branding/overrides/* work/decoded/
+
+      - name: Normalize in-app asset sizes
+        run: |
+          set -e
+          cd work/decoded
+          A="assets/qml/images"
+          fit () {
+            in="$1"; w="$2"; h="$3"
+            if [ -f "$in" ]; then
+              echo "Resizing $in to ${w}x${h}"
+              convert "$in" -resize "${w}x${h}"^ \
+                -gravity center -background none -extent "${w}x${h}" "$in"
+            fi
+          }
+          # Wide logos for toolbar/about
+          fit "$A/qgc_logo_full.png"        300 80
+          fit "$A/qground_toolbar_logo.png" 300 80
+          fit "$A/title_logo.png"           300 80
+          fit "$A/about_logo.png"           360 100
+          fit "$A/appbar_logo.png"          360 100
+          # Splash logos
+          fit "$A/splash_logo.png"         1024 1024
+          fit "$A/qgc_splash.png"          1024 1024
+
+      - name: Build APK
+        run: |
+          cd work/decoded
+          apktool b -f -o ../unsigned.apk
+
+      - name: Sign APK
+        run: |
+          cd work
+          mkdir -p keystore
+          keytool -genkey -v -keystore keystore/aeronics.jks -keyalg RSA -keysize 2048 -validity 10000 -alias aeronics -storepass password -keypass password -dname "CN=Aeronics"
+          jarsigner -verbose -sigalg SHA1withRSA -digestalg SHA1 -keystore keystore/aeronics.jks -storepass password -keypass password unsigned.apk aeronics
+          zipalign -v 4 unsigned.apk Aeronics-GCS.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
         with:
-          name: Aeronics-GCS-APK
+          name: Aeronics-GCS
           path: work/Aeronics-GCS.apk
