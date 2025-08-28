@@ -1,0 +1,108 @@
+name: Rebrand when Release is published (auto)
+
+on:
+  release:
+    types: [published, released]  # runs when you create/publish a release
+
+jobs:
+  rebrand:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      APP_NAME: Aeronics GCS
+      ICON: branding/aeronics_icon_512.png
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Download base.apk from the release that triggered this workflow
+      - name: Fetch base.apk from this release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          mkdir -p work && cd work
+          # Download the asset named base.apk from the triggering release
+          gh release download "${{ github.event.release.tag_name }}" \
+            --repo "$GITHUB_REPOSITORY" --pattern "base.apk" --clobber
+          test -f base.apk || { echo "::error ::No base.apk in this release"; exit 1; }
+          mv base.apk qgc.apk
+          ls -lh qgc.apk
+
+      # Tools (apktool without root writes)
+      - name: Setup tools
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y default-jre zipalign apksigner imagemagick curl
+          mkdir -p $HOME/bin
+          curl -L -o $HOME/bin/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
+          printf '#!/usr/bin/env bash\nexec java -jar $HOME/bin/apktool.jar "$@"\n' > $HOME/bin/apktool
+          chmod +x $HOME/bin/apktool
+          echo "$HOME/bin" >> $GITHUB_PATH
+      - name: Verify apktool
+        run: apktool --version
+
+      # Decode, set label safely, overwrite existing launcher icons only
+      - name: Decode APK
+        run: cd work && apktool d -f -o decoded qgc.apk
+
+      - name: Set manifest label + extractNativeLibs
+        run: |
+          set -e
+          cd work/decoded
+          if grep -q 'android:label=' AndroidManifest.xml; then
+            sed -i 's#android:label="[^"]*"#android:label="'"$APP_NAME"'"#' AndroidManifest.xml
+          else
+            sed -i 's#<application #<application android:label="'"$APP_NAME"'" #' AndroidManifest.xml
+          fi
+          if grep -q 'android:extractNativeLibs=' AndroidManifest.xml; then
+            sed -i 's#android:extractNativeLibs="[^"]*"#android:extractNativeLibs="true"#' AndroidManifest.xml
+          else
+            sed -i 's#<application #<application android:extractNativeLibs="true" #' AndroidManifest.xml
+          fi
+
+      - name: Overwrite existing launcher icons only
+        run: |
+          set -e
+          cd work/decoded
+          if [ ! -f "$GITHUB_WORKSPACE/$ICON" ]; then
+            echo "::error ::Missing branding/aeronics_icon_512.png (upload 512x512 PNG)"; exit 1
+          fi
+          mapfile -t files < <(find res -type f -name "ic_launcher*.png" | sort)
+          for f in "${files[@]}"; do
+            sz=$(identify -format "%wx%h" "$f" 2>/dev/null || echo "192x192")
+            echo "Overwriting $f with $sz"
+            convert "$GITHUB_WORKSPACE/$ICON" -resize "$sz" "$f"
+          done
+
+      - name: Build (verbose)
+        run: |
+          set -e
+          cd work
+          set +e
+          apktool b -v decoded -o Aeronics-GCS-unsigned.apk 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ $status -ne 0 ]; then
+            echo "=== Build failed (tail) ==="; tail -n 200 build.log || true
+            exit $status
+          fi
+
+      - name: Align, sign, verify
+        run: |
+          set -e
+          cd work
+          zipalign -f 4 Aeronics-GCS-unsigned.apk Aeronics-GCS-aligned.apk
+          keytool -genkey -v -keystore debug.keystore -storepass android \
+            -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Aeronics,O=Aeronics"
+          apksigner sign --ks debug.keystore --ks-pass pass:android \
+            --key-pass pass:android --out Aeronics-GCS.apk Aeronics-GCS-aligned.apk
+          apksigner verify Aeronics-GCS.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Aeronics-GCS-APK
+          path: work/Aeronics-GCS.apk
