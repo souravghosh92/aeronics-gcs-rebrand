@@ -1,4 +1,4 @@
-name: Rebrand QGroundControl to Aeronics GCS
+name: Rebrand QGroundControl to Aeronics GCS (safe)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
         description: "Direct download URL of QGroundControl APK"
         required: true
       APP_NAME:
-        description: "New app name"
+        description: "Visible app name"
         default: "Aeronics GCS"
 
 jobs:
@@ -21,12 +21,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup tools (apktool, zipalign, apksigner)
+      - name: Setup tools
         run: |
           set -e
           sudo apt-get update
           sudo apt-get install -y default-jre zipalign apksigner imagemagick curl
-          # Put apktool JAR in a fixed location and wrap it
           sudo mkdir -p /usr/local/lib
           sudo curl -L -o /usr/local/lib/apktool.jar \
             https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
@@ -40,7 +39,6 @@ jobs:
           set -e
           mkdir -p work
           cd work
-          # -L follows redirects; --fail makes curl exit on HTTP errors
           curl -L --fail -o qgc.apk "${{ github.event.inputs.QGC_APK_URL }}"
           ls -lh qgc.apk
 
@@ -50,30 +48,74 @@ jobs:
           cd work
           apktool d -f -o decoded qgc.apk
 
-      - name: Change app name
+      - name: Set app label safely + ensure native libs extraction
         run: |
           set -e
           cd work/decoded
-          sed -i "s/QGroundControl/${APP_NAME}/g" AndroidManifest.xml || true
-          grep -RIl "QGroundControl" res/ | xargs -r sed -i "s/QGroundControl/${APP_NAME}/g"
+          # Ensure resources have an app_name string; create if missing
+          mkdir -p res/values
+          if ! grep -q 'name="app_name"' res/values/strings.xml 2>/dev/null; then
+            echo '<resources/>' > res/values/strings.xml
+          fi
+          sed -i 's#</resources>##' res/values/strings.xml
+          echo "<string name=\"app_name\">${APP_NAME}</string>" >> res/values/strings.xml
+          echo "</resources>" >> res/values/strings.xml
 
-      - name: Replace launcher icon
+          # Point application label to @string/app_name and set extractNativeLibs=true
+          if grep -q '<application' AndroidManifest.xml; then
+            sed -i 's#<application #<application android:label="@string/app_name" #g' AndroidManifest.xml
+            if grep -q 'android:extractNativeLibs=' AndroidManifest.xml; then
+              sed -i 's#android:extractNativeLibs="[^"]*"#android:extractNativeLibs="true"#' AndroidManifest.xml
+            else
+              sed -i 's#<application #<application android:extractNativeLibs="true" #' AndroidManifest.xml
+            fi
+          fi
+
+      - name: Replace launcher icons (adaptive + densities)
         run: |
           set -e
           cd work/decoded
           if [ ! -f "$GITHUB_WORKSPACE/$ICON" ]; then
             echo "::error ::Missing $ICON (upload a 512x512 PNG)"; exit 1
           fi
-          mkdir -p res/mipmap-xxxhdpi
-          convert "$GITHUB_WORKSPACE/$ICON" -resize 192x192 res/mipmap-xxxhdpi/ic_launcher.png
+          mkdir -p res/mipmap-anydpi-v26 res/drawable-nodpi
+          cp "$GITHUB_WORKSPACE/$ICON" res/drawable-nodpi/aeronics_icon.png
+          cat > res/mipmap-anydpi-v26/ic_launcher.xml <<'XML'
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+            <background android:drawable="@android:color/transparent"/>
+            <foreground android:drawable="@drawable/aeronics_icon"/>
+          </adaptive-icon>
+XML
+          # Legacy PNGs for all densities (covers devices not using adaptive icons)
+          for spec in "mdpi 48" "hdpi 72" "xhdpi 96" "xxhdpi 144" "xxxhdpi 192"; do
+            d=$(echo $spec | awk '{print $1}'); s=$(echo $spec | awk '{print $2}');
+            mkdir -p "res/mipmap-${d}"
+            convert "$GITHUB_WORKSPACE/$ICON" -resize ${s}x${s} "res/mipmap-${d}/ic_launcher.png"
+          done
 
-      - name: Rebuild APK
+      - name: Optional precise in-app logo overrides
+        run: |
+          set -e
+          cd work/decoded
+          if [ -d "$GITHUB_WORKSPACE/branding/overrides" ]; then
+            while IFS= read -r -d '' f; do
+              rel="${f#"$GITHUB_WORKSPACE/branding/overrides/"}"
+              if [ -f "$rel" ]; then
+                cp -f "$f" "$rel"
+                echo "Override applied: $rel"
+              fi
+            done < <(find "$GITHUB_WORKSPACE/branding/overrides" -type f -print0)
+          else
+            echo "No branding/overrides folder (that's fine)."
+          fi
+
+      - name: Rebuild
         run: |
           set -e
           cd work
           apktool b decoded -o Aeronics-GCS-unsigned.apk
 
-      - name: Sign APK
+      - name: Sign & verify
         run: |
           set -e
           cd work
@@ -85,7 +127,7 @@ jobs:
             --out Aeronics-GCS.apk Aeronics-GCS-aligned.apk
           apksigner verify Aeronics-GCS.apk
 
-      - name: Upload APK
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: Aeronics-GCS-APK
