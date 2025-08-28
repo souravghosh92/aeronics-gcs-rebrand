@@ -1,4 +1,4 @@
-name: Rebrand QGroundControl to Aeronics GCS
+name: Rebrand QGroundControl to Aeronics GCS (with overrides)
 
 on:
   workflow_dispatch:
@@ -22,12 +22,12 @@ jobs:
 
       - name: Setup tools
         run: |
+          set -e
           sudo apt-get update
           sudo apt-get install -y default-jre zipalign apksigner imagemagick curl
           mkdir -p $HOME/bin
           curl -L -o $HOME/bin/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
-          echo '#!/usr/bin/env bash' > $HOME/bin/apktool
-          echo 'exec java -jar $HOME/bin/apktool.jar "$@"' >> $HOME/bin/apktool
+          printf '#!/usr/bin/env bash\nexec java -jar $HOME/bin/apktool.jar "$@"\n' > $HOME/bin/apktool
           chmod +x $HOME/bin/apktool
           echo "$HOME/bin" >> $GITHUB_PATH
 
@@ -36,40 +36,103 @@ jobs:
 
       - name: Download APK
         run: |
+          set -e
           mkdir -p work && cd work
           curl -L --fail -o qgc.apk "${{ github.event.inputs.QGC_APK_URL }}"
           ls -lh qgc.apk
 
       - name: Decode APK
-        run: cd work && apktool d -f -o decoded qgc.apk
-
-      - name: Change app name + manifest fix
         run: |
+          set -e
+          cd work
+          apktool d -f -o decoded qgc.apk
+
+      - name: Set manifest label + ensure native libs extraction
+        run: |
+          set -e
           cd work/decoded
-          mkdir -p res/values
-          if ! grep -q 'name="app_name"' res/values/strings.xml 2>/dev/null; then
-            echo '<resources><string name="app_name">'${APP_NAME}'</string></resources>' > res/values/strings.xml
+          # Safer: literal label (no res edits)
+          if grep -q 'android:label=' AndroidManifest.xml; then
+            sed -i 's#android:label="[^"]*"#android:label="'"${APP_NAME}"'"#' AndroidManifest.xml
           else
-            sed -i 's#<string name="app_name">.*</string>#<string name="app_name">'${APP_NAME}'</string>#' res/values/strings.xml
+            sed -i 's#<application #<application android:label="'"${APP_NAME}"'" #' AndroidManifest.xml
           fi
-          sed -i 's#<application #<application android:label="@string/app_name" android:extractNativeLibs="true" #' AndroidManifest.xml
+          # Prevent crash on native libs
+          if grep -q 'android:extractNativeLibs=' AndroidManifest.xml; then
+            sed -i 's#android:extractNativeLibs="[^"]*"#android:extractNativeLibs="true"#' AndroidManifest.xml
+          else
+            sed -i 's#<application #<application android:extractNativeLibs="true" #' AndroidManifest.xml
+          fi
 
-      - name: Replace launcher icon
+      - name: Replace launcher icons (overwrite existing only)
         run: |
+          set -e
           cd work/decoded
           if [ ! -f "$GITHUB_WORKSPACE/$ICON" ]; then
-            echo "::error ::Missing branding/aeronics_icon_512.png"; exit 1
+            echo "::error ::Missing branding/aeronics_icon_512.png (upload 512x512 PNG)"; exit 1
           fi
-          for spec in "mdpi 48" "hdpi 72" "xhdpi 96" "xxhdpi 144" "xxxhdpi 192"; do
-            d=$(echo $spec | awk '{print $1}'); s=$(echo $spec | awk '{print $2}')
-            mkdir -p "res/mipmap-${d}"
-            convert "$GITHUB_WORKSPACE/$ICON" -resize ${s}x${s} "res/mipmap-${d}/ic_launcher.png"
+          mapfile -t files < <(find res -type f -name "ic_launcher*.png" | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::warning ::No ic_launcher*.png found; launcher icon unchanged."
+          fi
+          for f in "${files[@]}"; do
+            sz=$(identify -format "%wx%h" "$f" 2>/dev/null || echo "192x192")
+            echo "Overwriting $f with $sz"
+            convert "$GITHUB_WORKSPACE/$ICON" -resize "$sz" "$f"
           done
 
-      - name: Rebuild + sign
+      - name: List likely QGC logo files (to help you create overrides)
         run: |
+          set -e
+          cd work/decoded
+          echo "=== Possible in-app logo files ==="
+          # common patterns for QGC assets
+          find res -type f \( -iname "*logo*.png" -o -iname "*qgc*.png" -o -iname "*qground*.png" \) | sort | tee $GITHUB_WORKSPACE/likely_logo_files.txt
+      - name: Upload logo filename list
+        uses: actions/upload-artifact@v4
+        with:
+          name: likely-logo-files
+          path: likely_logo_files.txt
+          if-no-files-found: ignore
+
+      - name: Apply precise overrides from branding/overrides (same names/paths)
+        run: |
+          set -e
+          cd work/decoded
+          SRC="$GITHUB_WORKSPACE/branding/overrides"
+          if [ -d "$SRC" ]; then
+            echo "Applying overrides from $SRC"
+            while IFS= read -r -d '' f; do
+              rel="${f#"$SRC/"}"
+              if [ -f "$rel" ]; then
+                cp -f "$f" "$rel"
+                echo "Override applied: $rel"
+              else
+                # If destination folder doesn’t exist (rare), skip to avoid build errors
+                echo "::warning ::Destination $rel not found in APK; skipped"
+              fi
+            done < <(find "$SRC" -type f -print0)
+          else
+            echo "No branding/overrides directory; skipping precise overrides."
+          fi
+
+      - name: Build (verbose)
+        run: |
+          set -e
           cd work
-          apktool b decoded -o Aeronics-GCS-unsigned.apk
+          set +e
+          apktool b -v decoded -o Aeronics-GCS-unsigned.apk 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ $status -ne 0 ]; then
+            echo "=== Build failed (tail) ==="; tail -n 200 build.log || true
+            exit $status
+          fi
+
+      - name: Align, sign, verify
+        run: |
+          set -e
+          cd work
           zipalign -f 4 Aeronics-GCS-unsigned.apk Aeronics-GCS-aligned.apk
           keytool -genkey -v -keystore debug.keystore -storepass android \
             -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
