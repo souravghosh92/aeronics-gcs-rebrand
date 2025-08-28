@@ -30,7 +30,9 @@ jobs:
           echo 'exec java -jar $HOME/bin/apktool.jar "$@"' >> $HOME/bin/apktool
           chmod +x $HOME/bin/apktool
           echo "$HOME/bin" >> $GITHUB_PATH
-          apktool --version
+
+      - name: Verify apktool
+        run: apktool --version
 
       - name: Download APK
         run: |
