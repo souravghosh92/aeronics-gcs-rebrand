@@ -24,16 +24,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y default-jre zipalign apksigner imagemagick curl
-          sudo mkdir -p /usr/local/lib
-          curl -L -o /usr/local/lib/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
-          echo '#!/usr/bin/env bash' | sudo tee /usr/local/bin/apktool >/dev/null
-          echo 'exec java -jar /usr/local/lib/apktool.jar "$@"' | sudo tee -a /usr/local/bin/apktool >/dev/null
-          sudo chmod +x /usr/local/bin/apktool
+          mkdir -p $HOME/bin
+          curl -L -o $HOME/bin/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
+          echo '#!/usr/bin/env bash' > $HOME/bin/apktool
+          echo 'exec java -jar $HOME/bin/apktool.jar "$@"' >> $HOME/bin/apktool
+          chmod +x $HOME/bin/apktool
+          echo "$HOME/bin" >> $GITHUB_PATH
+          apktool --version
 
       - name: Download APK
         run: |
           mkdir -p work && cd work
           curl -L --fail -o qgc.apk "${{ github.event.inputs.QGC_APK_URL }}"
+          ls -lh qgc.apk
 
       - name: Decode APK
         run: cd work && apktool d -f -o decoded qgc.apk
