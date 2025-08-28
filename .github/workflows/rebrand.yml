@@ -21,49 +21,69 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup tools
+      - name: Setup tools (apktool, zipalign, apksigner)
         run: |
+          set -e
           sudo apt-get update
-          sudo apt-get install -y default-jre zipalign apksigner imagemagick wget
-          wget -O apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
-          echo -e '#!/usr/bin/env bash\njava -jar $PWD/apktool.jar "$@"' | sudo tee /usr/local/bin/apktool >/dev/null
+          sudo apt-get install -y default-jre zipalign apksigner imagemagick curl
+          # Put apktool JAR in a fixed location and wrap it
+          sudo mkdir -p /usr/local/lib
+          sudo curl -L -o /usr/local/lib/apktool.jar \
+            https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
+          echo '#!/usr/bin/env bash' | sudo tee /usr/local/bin/apktool >/dev/null
+          echo 'exec java -jar /usr/local/lib/apktool.jar "$@"' | sudo tee -a /usr/local/bin/apktool >/dev/null
           sudo chmod +x /usr/local/bin/apktool
+          apktool --version
 
       - name: Download QGC APK
         run: |
+          set -e
           mkdir -p work
           cd work
-          wget -O qgc.apk "${{ github.event.inputs.QGC_APK_URL }}"
+          # -L follows redirects; --fail makes curl exit on HTTP errors
+          curl -L --fail -o qgc.apk "${{ github.event.inputs.QGC_APK_URL }}"
+          ls -lh qgc.apk
 
       - name: Decode APK
         run: |
+          set -e
           cd work
           apktool d -f -o decoded qgc.apk
 
       - name: Change app name
         run: |
+          set -e
           cd work/decoded
           sed -i "s/QGroundControl/${APP_NAME}/g" AndroidManifest.xml || true
           grep -RIl "QGroundControl" res/ | xargs -r sed -i "s/QGroundControl/${APP_NAME}/g"
 
       - name: Replace launcher icon
         run: |
+          set -e
           cd work/decoded
-          test -f "$GITHUB_WORKSPACE/$ICON" || { echo "Missing branding/aeronics_icon_512.png"; exit 1; }
+          if [ ! -f "$GITHUB_WORKSPACE/$ICON" ]; then
+            echo "::error ::Missing $ICON (upload a 512x512 PNG)"; exit 1
+          fi
           mkdir -p res/mipmap-xxxhdpi
           convert "$GITHUB_WORKSPACE/$ICON" -resize 192x192 res/mipmap-xxxhdpi/ic_launcher.png
 
       - name: Rebuild APK
         run: |
+          set -e
           cd work
           apktool b decoded -o Aeronics-GCS-unsigned.apk
 
       - name: Sign APK
         run: |
+          set -e
           cd work
           zipalign -f 4 Aeronics-GCS-unsigned.apk Aeronics-GCS-aligned.apk
-          keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Aeronics, O=Aeronics"
-          apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out Aeronics-GCS.apk Aeronics-GCS-aligned.apk
+          keytool -genkey -v -keystore debug.keystore -storepass android \
+            -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Aeronics, O=Aeronics"
+          apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android \
+            --out Aeronics-GCS.apk Aeronics-GCS-aligned.apk
+          apksigner verify Aeronics-GCS.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
