@@ -1,4 +1,4 @@
-name: Rebrand Aeronics GCS (from repo release)
+name: Rebrand Aeronics GCS (with overrides)
 
 on:
   workflow_dispatch:
@@ -17,7 +17,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download base.apk from this repo's release
+      # 1. Download base.apk from your release (tag: Base.apk)
+      - name: Download base.apk from release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -28,6 +29,7 @@ jobs:
           mv base.apk qgc.apk
           ls -lh qgc.apk
 
+      # 2. Setup apktool + tools
       - name: Setup tools
         run: |
           sudo apt-get update
@@ -40,10 +42,12 @@ jobs:
       - name: Verify apktool
         run: apktool --version
 
+      # 3. Decode APK
       - name: Decode APK
         run: cd work && apktool d -f -o decoded qgc.apk
 
-      - name: Set manifest label + ensure native libs extraction
+      # 4. Update manifest (app name + native libs)
+      - name: Update manifest
         run: |
           cd work/decoded
           if grep -q 'android:label=' AndroidManifest.xml; then
@@ -57,7 +61,8 @@ jobs:
             sed -i 's#<application #<application android:extractNativeLibs="true" #' AndroidManifest.xml
           fi
 
-      - name: Replace launcher icons (overwrite existing only)
+      # 5. Replace launcher icons
+      - name: Replace launcher icons
         run: |
           cd work/decoded
           if [ ! -f "$GITHUB_WORKSPACE/$ICON" ]; then
@@ -70,7 +75,8 @@ jobs:
             convert "$GITHUB_WORKSPACE/$ICON" -resize "$sz" "$f"
           done
 
-      - name: Apply overrides (optional)
+      # 6. Apply overrides (your Aeronics logos)
+      - name: Apply overrides from branding/overrides
         run: |
           cd work/decoded
           SRC="$GITHUB_WORKSPACE/branding/overrides"
@@ -83,14 +89,14 @@ jobs:
                 echo "Override applied: $rel"
               fi
             done < <(find "$SRC" -type f -print0)
+          else
+            echo "No branding/overrides directory."
           fi
 
+      # 7. Build & sign
       - name: Build
-        run: |
-          cd work
-          apktool b decoded -o Aeronics-GCS-unsigned.apk
-
-      - name: Align, sign, verify
+        run: cd work && apktool b decoded -o Aeronics-GCS-unsigned.apk
+      - name: Align & Sign
         run: |
           cd work
           zipalign -f 4 Aeronics-GCS-unsigned.apk Aeronics-GCS-aligned.apk
@@ -101,6 +107,7 @@ jobs:
             --key-pass pass:android --out Aeronics-GCS.apk Aeronics-GCS-aligned.apk
           apksigner verify Aeronics-GCS.apk
 
+      # 8. Upload final APK
       - uses: actions/upload-artifact@v4
         with:
           name: Aeronics-GCS-APK
