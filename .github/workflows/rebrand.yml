@@ -43,14 +43,16 @@ jobs:
           cd work
           apktool d -f base.apk -o decoded
           test -d decoded
-          - name: List possible logos
+
+      - name: List possible logos
         run: |
           cd work/decoded
           echo "=== Searching for logo/splash/launcher files in APK ==="
           { find res -type f \( -iname "*ic_launcher*" -o -iname "*logo*.*" -o -iname "*qgc*.*" -o -iname "*qground*.*" -o -iname "*splash*.*" \) 2>/dev/null;
             find assets -type f \( -iname "*logo*.*" -o -iname "*qgc*.*" -o -iname "*qground*.*" -o -iname "*splash*.*" \) 2>/dev/null; } \
           | sort | tee "$GITHUB_WORKSPACE/image-map.txt"
-          - name: Upload image map
+
+      - name: Upload image map
         uses: actions/upload-artifact@v4
         with:
           name: image-map
