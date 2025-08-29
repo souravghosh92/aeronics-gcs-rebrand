@@ -6,15 +6,18 @@ jobs:
   rebrand:
     runs-on: ubuntu-latest
     env:
+      # Your base QGC APK
       BASE_APK_URL: https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/Base.apk/base.apk
+      # Visible app name
       APP_NAME: Aeronics GCS
+      # 512x512 PNG you added to the repo
       ICON_PATH: branding/aeronics_icon_512.png
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup tools (apktool, ImageMagick, JDK, UberApkSigner)
+      - name: Setup tools (apktool, ImageMagick, JDK, signer)
         run: |
           set -e
           sudo apt-get update
@@ -43,26 +46,11 @@ jobs:
           apktool d -f base.apk -o decoded
           test -d decoded
 
-      # Optional: keep this to see paths inside APK when needed
-      - name: List possible logos
-        run: |
-          cd work/decoded
-          echo "=== Searching for logo/splash/launcher files in APK ==="
-          { find res -type f \( -iname "*ic_launcher*" -o -iname "*logo*.*" -o -iname "*qgc*.*" -o -iname "*qground*.*" -o -iname "*splash*.*" \) 2>/dev/null;
-            find assets -type f \( -iname "*logo*.*" -o -iname "*qgc*.*" -o -iname "*qground*.*" -o -iname "*splash*.*" \) 2>/dev/null; } \
-          | sort | tee "$GITHUB_WORKSPACE/image-map.txt"
-
-      - name: Upload image map
-        uses: actions/upload-artifact@v4
-        with:
-          name: image-map
-          path: image-map.txt
-
       - name: Update manifest (app label + extractNativeLibs)
         run: |
           set -e
           cd work/decoded
-          # Change visible app name
+          # Visible app name
           if grep -q 'android:label=' AndroidManifest.xml; then
             sed -i 's#android:label="[^"]*"#android:label="'"$APP_NAME"'"#' AndroidManifest.xml
           else
@@ -75,57 +63,56 @@ jobs:
             sed -i 's#<application #<application android:extractNativeLibs="true" #' AndroidManifest.xml
           fi
 
-      - name: Replace launcher icons (all densities + adaptive)
+      - name: Replace launcher icons (generate our own mipmaps)
         run: |
           set -e
           cd work/decoded
-          ICON="$GITHUB_WORKSPACE/$ICON_PATH"
-          if [ ! -f "$ICON" ]; then
-            echo "::error ::Missing $ICON_PATH (512x512 PNG)"; exit 1
+          SRC="$GITHUB_WORKSPACE/branding/aeronics_icon_512.png"
+          if [ ! -f "$SRC" ]; then
+            echo "::error ::Missing branding/aeronics_icon_512.png (512x512 PNG)"; exit 1
           fi
-
-          # Adaptive foreground/background (used by XML)
-          mkdir -p res/drawable
-          convert "$ICON" -resize 432x432 res/drawable/ic_launcher_foreground.png
-          convert -size 108x108 xc:"#FFFFFF" res/drawable/ic_launcher_background.png
-
-          # Patch adaptive xmls if present
-          if [ -d res/mipmap-anydpi-v26 ]; then
-            for xml in res/mipmap-anydpi-v26/ic_launcher*.xml; do
-              [ -f "$xml" ] || continue
-              sed -i 's#@mipmap/ic_launcher_foreground#@drawable/ic_launcher_foreground#g' "$xml" || true
-              sed -i 's#@mipmap/ic_launcher_background#@drawable/ic_launcher_background#g' "$xml" || true
-              sed -i 's#@drawable-anydpi/ic_launcher_foreground#@drawable/ic_launcher_foreground#g' "$xml" || true
-              sed -i 's#@drawable-anydpi/ic_launcher_background#@drawable/ic_launcher_background#g' "$xml" || true
-              echo "Patched $xml"
-            done
-          fi
-
-          # Overwrite legacy PNGs in all densities (note the -v4 folders)
-          for spec in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
-            den=${spec%%:*}; size=${spec##*:}
-            for folder in "res/mipmap-$den" "res/mipmap-$den-v4"; do
-              for name in ic_launcher.png ic_launcher_round.png; do
-                dest="$folder/$name"
-                if [ -f "$dest" ]; then
-                  convert "$ICON" -resize ${size}x${size} "$dest"
-                  echo "Replaced $dest"
-                fi
-              done
-            done
+          # Make mipmap folders if they don't exist
+          for den in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            mkdir -p "res/mipmap-$den" "res/mipmap-$den-v4"
+          done
+          # Generate mipmap icons named ic_aeronics.png
+          convert "$SRC" -resize 48x48   res/mipmap-mdpi/ic_aeronics.png
+          convert "$SRC" -resize 72x72   res/mipmap-hdpi/ic_aeronics.png
+          convert "$SRC" -resize 96x96   res/mipmap-xhdpi/ic_aeronics.png
+          convert "$SRC" -resize 144x144 res/mipmap-xxhdpi/ic_aeronics.png
+          convert "$SRC" -resize 192x192 res/mipmap-xxxhdpi/ic_aeronics.png
+          # Also duplicate into -v4 folders if present
+          for den in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            [ -d "res/mipmap-$den-v4" ] && cp "res/mipmap-$den/ic_aeronics.png" "res/mipmap-$den-v4/ic_aeronics.png" || true
           done
 
-      - name: Apply in-app Aeronics logos (exact paths from image-map)
+      - name: Force launcher + roundIcon in manifest
         run: |
           set -e
-          # Copy your assets explicitly (use the exact paths found in image-map.txt)
-          cp branding/overrides/assets/qml/images/about_logo.png            work/decoded/assets/qml/images/about_logo.png            || true
-          cp branding/overrides/assets/qml/images/appbar_logo.png           work/decoded/assets/qml/images/appbar_logo.png           || true
-          cp branding/overrides/assets/qml/images/qgc_logo_full.png         work/decoded/assets/qml/images/qgc_logo_full.png         || true
-          cp branding/overrides/assets/qml/images/qgc_splash.png            work/decoded/assets/qml/images/qgc_splash.png            || true
-          cp branding/overrides/assets/qml/images/qground_toolbar_logo.png  work/decoded/assets/qml/images/qground_toolbar_logo.png  || true
-          cp branding/overrides/assets/qml/images/splash_logo.png           work/decoded/assets/qml/images/splash_logo.png           || true
-          cp branding/overrides/assets/qml/images/title_logo.png            work/decoded/assets/qml/images/title_logo.png            || true
+          cd work/decoded
+          # Make sure <application ... android:icon= and roundIcon= point to our mipmap
+          if grep -q 'android:icon=' AndroidManifest.xml; then
+            sed -i 's#android:icon="[^"]*"#android:icon="@mipmap/ic_aeronics"#' AndroidManifest.xml
+          else
+            sed -i 's#<application #<application android:icon="@mipmap/ic_aeronics" #' AndroidManifest.xml
+          fi
+          if grep -q 'android:roundIcon=' AndroidManifest.xml; then
+            sed -i 's#android:roundIcon="[^"]*"#android:roundIcon="@mipmap/ic_aeronics"#' AndroidManifest.xml
+          else
+            sed -i 's#<application #<application android:roundIcon="@mipmap/ic_aeronics" #' AndroidManifest.xml
+          fi
+
+      - name: Patch Android 12 splashscreen icon
+        run: |
+          set -e
+          cd work/decoded
+          if [ -f res/drawable/splashscreen.xml ]; then
+            # Replace any reference inside splashscreen.xml to our new mipmap icon
+            sed -i 's#@mipmap/[^"]*#@mipmap/ic_aeronics#g; s#@drawable/[^"]*#@mipmap/ic_aeronics#g' res/drawable/splashscreen.xml
+            echo "Patched res/drawable/splashscreen.xml to use @mipmap/ic_aeronics"
+          else
+            echo "Note: res/drawable/splashscreen.xml not found to patch (nothing to do)."
+          fi
 
       - name: Build APK
         run: |
@@ -134,7 +121,7 @@ jobs:
           apktool b -f -o ../unsigned.apk
           ls -lh ../unsigned.apk
 
-      - name: Sign & Align (Uber APK Signer)
+      - name: Sign & Align
         run: |
           set -e
           cd work
@@ -149,7 +136,7 @@ jobs:
           mv "$out_apk" Aeronics-GCS.apk
           ls -lh Aeronics-GCS.apk
 
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Aeronics-GCS.apk
