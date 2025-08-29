@@ -1,5 +1,4 @@
 name: Rebrand Aeronics GCS
-
 on:
   workflow_dispatch:
 
@@ -44,6 +43,7 @@ jobs:
           apktool d -f base.apk -o decoded
           test -d decoded
 
+      # Optional: keep this to see paths inside APK when needed
       - name: List possible logos
         run: |
           cd work/decoded
@@ -75,21 +75,24 @@ jobs:
             sed -i 's#<application #<application android:extractNativeLibs="true" #' AndroidManifest.xml
           fi
 
-      - name: Replace launcher icons (adaptive + round)
+      - name: Replace launcher icons (all densities + adaptive)
         run: |
           set -e
           cd work/decoded
           ICON="$GITHUB_WORKSPACE/$ICON_PATH"
           if [ ! -f "$ICON" ]; then
-            echo "::error ::Missing $ICON_PATH (upload 512x512 PNG)"; exit 1
+            echo "::error ::Missing $ICON_PATH (512x512 PNG)"; exit 1
           fi
-          # adaptive pieces
+
+          # Adaptive foreground/background (used by XML)
           mkdir -p res/drawable
           convert "$ICON" -resize 432x432 res/drawable/ic_launcher_foreground.png
           convert -size 108x108 xc:"#FFFFFF" res/drawable/ic_launcher_background.png
-          # patch adaptive xmls if present
+
+          # Patch adaptive xmls if present
           if [ -d res/mipmap-anydpi-v26 ]; then
-            for xml in $(find res/mipmap-anydpi-v26 -maxdepth 1 -name "ic_launcher*.xml" 2>/dev/null); do
+            for xml in res/mipmap-anydpi-v26/ic_launcher*.xml; do
+              [ -f "$xml" ] || continue
               sed -i 's#@mipmap/ic_launcher_foreground#@drawable/ic_launcher_foreground#g' "$xml" || true
               sed -i 's#@mipmap/ic_launcher_background#@drawable/ic_launcher_background#g' "$xml" || true
               sed -i 's#@drawable-anydpi/ic_launcher_foreground#@drawable/ic_launcher_foreground#g' "$xml" || true
@@ -97,65 +100,32 @@ jobs:
               echo "Patched $xml"
             done
           fi
-          # legacy pngs
-          find res -type f \( -name "ic_launcher.png" -o -name "ic_launcher_round.png" \) | while read f; do
-            sz=$(identify -format "%wx%h" "$f" 2>/dev/null || echo "192x192")
-            echo "Overwriting $f with $sz"
-            convert "$ICON" -resize "$sz" "$f"
+
+          # Overwrite legacy PNGs in all densities (note the -v4 folders)
+          for spec in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
+            den=${spec%%:*}; size=${spec##*:}
+            for folder in "res/mipmap-$den" "res/mipmap-$den-v4"; do
+              for name in ic_launcher.png ic_launcher_round.png; do
+                dest="$folder/$name"
+                if [ -f "$dest" ]; then
+                  convert "$ICON" -resize ${size}x${size} "$dest"
+                  echo "Replaced $dest"
+                fi
+              done
+            done
           done
 
-      - name: Apply overrides folder (res + assets)
+      - name: Apply in-app Aeronics logos (exact paths from image-map)
         run: |
           set -e
-          cd work/decoded
-          SRC="$GITHUB_WORKSPACE/branding/overrides"
-          if [ -d "$SRC" ]; then
-            echo "Copying overrides from $SRC"
-            find "$SRC" -type f -print0 | while IFS= read -r -d '' f; do
-              rel="${f#"$SRC/"}"
-              if [ -f "$rel" ]; then
-                mkdir -p "$(dirname "$rel")"
-                cp -f "$f" "$rel"
-                echo "✔ $rel"
-              else
-                echo "::warning ::Destination $rel not found in decoded APK; skipped"
-              fi
-            done
-          fi
-
-      - name: Apply in-app Aeronics logos (explicit copy)
-        run: |
-          set -e
-          # Copy your assets explicitly (helps if the generic copy above skipped something)
-          cp branding/overrides/assets/qml/images/about_logo.png           work/decoded/assets/qml/images/about_logo.png           || true
-          cp branding/overrides/assets/qml/images/appbar_logo.png          work/decoded/assets/qml/images/appbar_logo.png          || true
-          cp branding/overrides/assets/qml/images/qgc_logo_full.png        work/decoded/assets/qml/images/qgc_logo_full.png        || true
-          cp branding/overrides/assets/qml/images/qgc_splash.png           work/decoded/assets/qml/images/qgc_splash.png           || true
-          cp branding/overrides/assets/qml/images/qground_toolbar_logo.png work/decoded/assets/qml/images/qground_toolbar_logo.png || true
-          cp branding/overrides/assets/qml/images/splash_logo.png          work/decoded/assets/qml/images/splash_logo.png          || true
-          cp branding/overrides/assets/qml/images/title_logo.png           work/decoded/assets/qml/images/title_logo.png           || true
-
-      - name: Normalize in-app asset sizes (safe defaults)
-        run: |
-          set -e
-          cd work/decoded
-          A="assets/qml/images"
-          fit () {
-            in="$1"; w="$2"; h="$3"
-            if [ -f "$in" ]; then
-              echo "Fitting $in to ${w}x${h}"
-              convert "$in" -resize "${w}x${h}"^ -gravity center -background none -extent "${w}x${h}" "$in"
-            fi
-          }
-          # toolbar/title/about (wide)
-          fit "$A/qgc_logo_full.png"        300 80
-          fit "$A/qground_toolbar_logo.png" 300 80
-          fit "$A/title_logo.png"           300 80
-          fit "$A/about_logo.png"           360 100
-          fit "$A/appbar_logo.png"          360 100
-          # splash
-          fit "$A/splash_logo.png"         1024 1024
-          fit "$A/qgc_splash.png"          1024 1024
+          # Copy your assets explicitly (use the exact paths found in image-map.txt)
+          cp branding/overrides/assets/qml/images/about_logo.png            work/decoded/assets/qml/images/about_logo.png            || true
+          cp branding/overrides/assets/qml/images/appbar_logo.png           work/decoded/assets/qml/images/appbar_logo.png           || true
+          cp branding/overrides/assets/qml/images/qgc_logo_full.png         work/decoded/assets/qml/images/qgc_logo_full.png         || true
+          cp branding/overrides/assets/qml/images/qgc_splash.png            work/decoded/assets/qml/images/qgc_splash.png            || true
+          cp branding/overrides/assets/qml/images/qground_toolbar_logo.png  work/decoded/assets/qml/images/qground_toolbar_logo.png  || true
+          cp branding/overrides/assets/qml/images/splash_logo.png           work/decoded/assets/qml/images/splash_logo.png           || true
+          cp branding/overrides/assets/qml/images/title_logo.png            work/decoded/assets/qml/images/title_logo.png            || true
 
       - name: Build APK
         run: |
