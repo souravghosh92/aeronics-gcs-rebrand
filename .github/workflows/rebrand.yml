@@ -4,51 +4,48 @@ on:
   workflow_dispatch:
     inputs:
       base_apk_url:
-        description: "Direct download URL for the base QGroundControl APK"
+        description: "Direct download URL of the base APK"
         required: true
-        type: string
+        default: "https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/Base.apk/base.apk"
       app_name:
-        description: "Visible application name"
-        required: false
+        description: "Visible app name"
+        required: true
         default: "Aeronics GCS"
-        type: string
+      icon_path:
+        description: "Path (in repo) to 512x512 launcher icon PNG"
+        required: true
+        default: "branding/aeronics_icon_512.png"
 
 jobs:
   rebrand:
     runs-on: ubuntu-latest
-    env:
-      APP_NAME: ${{ inputs.app_name }}
-      BASE_URL: ${{ inputs.base_apk_url }}
-      ICON_PATH: branding/aeronics_icon_512.png
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup tools (apktool, ImageMagick, Java, uber-apk-signer)
+      - name: Setup tools (apktool, ImageMagick, signer)
         run: |
-          set -e
+          set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y imagemagick wget unzip curl openjdk-17-jre-headless rsync
-          # Install apktool
+          sudo apt-get install -y default-jre unzip imagemagick curl
+          # Install apktool (jar + wrapper)
           APKTOOL_VER=2.9.3
-          sudo wget -q -O /usr/local/lib/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VER}/apktool_${APKTOOL_VER}.jar
+          sudo curl -L -o /usr/local/bin/apktool.jar "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VER}/apktool_${APKTOOL_VER}.jar"
           echo '#!/usr/bin/env bash' | sudo tee /usr/local/bin/apktool >/dev/null
-          echo 'java -jar /usr/local/lib/apktool.jar "$@"' | sudo tee -a /usr/local/bin/apktool >/dev/null
+          echo 'exec java -jar /usr/local/bin/apktool.jar "$@"' | sudo tee -a /usr/local/bin/apktool >/dev/null
           sudo chmod +x /usr/local/bin/apktool
-          apktool --version
+          apktool -version
           # uber-apk-signer
           UBER_VER=1.3.0
-          wget -q -O uber-apk-signer.jar https://github.com/patrickfav/uber-apk-signer/releases/download/v${UBER_VER}/uber-apk-signer-${UBER_VER}.jar
-          ls -l uber-apk-signer.jar
+          curl -L -o uber-apk-signer.jar "https://github.com/patrickfav/uber-apk-signer/releases/download/v${UBER_VER}/uber-apk-signer-${UBER_VER}.jar"
+          mkdir -p work
 
       - name: Download Base APK
         run: |
           set -e
-          mkdir -p work
-          curl -L "$BASE_URL" -o work/base.apk
-          file work/base.apk
-          ls -lh work/base.apk
+          cd work
+          curl -fL "${{ inputs.base_apk_url }}" -o base.apk
+          ls -lh base.apk
 
       - name: Decode APK
         run: |
@@ -57,45 +54,17 @@ jobs:
           apktool d -f base.apk -o decoded
           test -d decoded
 
-      # ---------- Debug aides (artifacts you can open) ----------
-      - name: Scan QML for in-app logo references
-        run: |
-          set -e
-          cd work/decoded
-          { 
-            find . -type f -name "*.qml" -print0 \
-              | xargs -0 grep -nE "qgc_|qground_|toolbar|appbar|splash|title|about|logo" || true
-          } | tee "$GITHUB_WORKSPACE/qml-uses.txt"
-
-      - name: Show image files present in decoded APK
-        run: |
-          set -e
-          cd work/decoded
-          {
-            find assets -type f -ipath "*/qml/*" -iregex ".*\.\(png\|svg\)" -printf "%P\n" 2>/dev/null || true
-            find res -type f -iregex ".*\.\(png\|svg\)" -printf "%P\n" 2>/dev/null || true
-          } | sort | tee "$GITHUB_WORKSPACE/found-images.txt"
-
-      - name: Upload debug lists
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-image-lists
-          path: |
-            qml-uses.txt
-            found-images.txt
-      # ---------------------------------------------------------
-
       - name: Update manifest (app label + extractNativeLibs)
         run: |
           set -e
           cd work/decoded
           # Change visible app name
           if grep -q 'android:label=' AndroidManifest.xml; then
-            sed -i 's#android:label="[^"]*"#android:label="'"$APP_NAME"'"#' AndroidManifest.xml
+            sed -i 's#android:label="[^"]*"#android:label="'"${{ inputs.app_name }}"'"#' AndroidManifest.xml
           else
-            sed -i 's#<application #<application android:label="'"$APP_NAME"'" #' AndroidManifest.xml
+            sed -i 's#<application #<application android:label="'"${{ inputs.app_name }}"'" #' AndroidManifest.xml
           fi
-          # Ensure native libs extracted (prevents some crashes on certain bases)
+          # Ensure native libs extracted (avoids startup crashes on some devices)
           if grep -q 'android:extractNativeLibs=' AndroidManifest.xml; then
             sed -i 's#android:extractNativeLibs="[^"]*"#android:extractNativeLibs="true"#' AndroidManifest.xml
           else
@@ -106,9 +75,9 @@ jobs:
         run: |
           set -e
           cd work/decoded
-          SRC="$GITHUB_WORKSPACE/$ICON_PATH"
+          SRC="$GITHUB_WORKSPACE/${{ inputs.icon_path }}"
           if [ ! -f "$SRC" ]; then
-            echo "::error ::Missing $ICON_PATH (expected 512x512 PNG)"; exit 1
+            echo "::error ::Missing $SRC (512x512 PNG)"; exit 1
           fi
           # Make mipmap folders if they don't exist
           for den in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
@@ -120,7 +89,7 @@ jobs:
           convert "$SRC" -resize 96x96   res/mipmap-xhdpi/ic_aeronics.png
           convert "$SRC" -resize 144x144 res/mipmap-xxhdpi/ic_aeronics.png
           convert "$SRC" -resize 192x192 res/mipmap-xxxhdpi/ic_aeronics.png
-          # Duplicate into -v4 if those folders exist
+          # Also duplicate into -v4 folders if present
           for den in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
             [ -d "res/mipmap-$den-v4" ] && cp "res/mipmap-$den/ic_aeronics.png" "res/mipmap-$den-v4/ic_aeronics.png" || true
           done
@@ -129,6 +98,7 @@ jobs:
         run: |
           set -e
           cd work/decoded
+          # Ensure android:icon and android:roundIcon point to our mipmap
           if grep -q 'android:icon=' AndroidManifest.xml; then
             sed -i 's#android:icon="[^"]*"#android:icon="@mipmap/ic_aeronics"#' AndroidManifest.xml
           else
@@ -148,61 +118,65 @@ jobs:
             sed -i 's#@mipmap/[^"]*#@mipmap/ic_aeronics#g; s#@drawable/[^"]*#@mipmap/ic_aeronics#g' res/drawable/splashscreen.xml
             echo "Patched res/drawable/splashscreen.xml"
           else
-            echo "No Android 12 splashscreen XML to patch."
+            echo "No res/drawable/splashscreen.xml to patch."
           fi
 
       - name: Apply overrides (assets & res)
         run: |
           set -e
           cd work/decoded
-          # QML/assets overrides
-          if [ -d "$GITHUB_WORKSPACE/branding/overrides/assets" ]; then
-            mkdir -p assets
-            rsync -av --delete "$GITHUB_WORKSPACE/branding/overrides/assets/" assets/
-          fi
-          # res/ overrides (e.g., drawables if you added any)
+          # Copy any resource overrides
           if [ -d "$GITHUB_WORKSPACE/branding/overrides/res" ]; then
-            mkdir -p res
-            rsync -av --delete "$GITHUB_WORKSPACE/branding/overrides/res/" res/
+            rsync -a "$GITHUB_WORKSPACE/branding/overrides/res/" "res/"
           fi
-          echo "After overrides:"
-          find assets -maxdepth 3 -type f -printf "%P\n" 2>/dev/null | sort || true
+          # Copy any assets (e.g., QML images)
+          if [ -d "$GITHUB_WORKSPACE/branding/overrides/assets" ]; then
+            rsync -a "$GITHUB_WORKSPACE/branding/overrides/assets/" "assets/"
+          fi
 
-      - name: Patch QML to use our in-app images (PNG)
+      - name: Patch QML to use our in-app images
         run: |
           set -e
           cd work/decoded
-          # Map upstream keys -> our file names in assets/qml/images
-          declare -A MAP=(
-            ["qground_toolbar_logo"]="qground_toolbar_logo.png"
-            ["qgc_logo_full"]="qgc_logo_full.png"
-            ["title_logo"]="title_logo.png"
-            ["about_logo"]="about_logo.png"
-            ["splash_logo"]="splash_logo.png"
-            ["qgc_splash"]="qgc_splash.png"
-          )
-          for key in "${!MAP[@]}"; do
-            new="assets/qml/images/${MAP[$key]}"
-            # Replace any *.qml reference to the key (svg/png) with our controlled PNG path
-            find . -type f -name "*.qml" -print0 \
-              | xargs -0 sed -i -E "s#[\":]([^\"':]*${key})\.(svg|png)#[\":]${new}#g"
-          done
+          # Replace known QGC image references inside QML with our branded images
+          patch_one() {
+            local orig="$1"
+            local repl="branding/overrides/assets/qml/images/$1"
+            # If a branded file with that name exists, patch references
+            if [ -f "$GITHUB_WORKSPACE/$repl" ]; then
+              for f in $(grep -ril "$orig" assets/qml || true); do
+                echo "Patching $f: $orig -> $repl"
+                sed -i "s#$orig#$repl#g" "$f"
+              done
+            else
+              echo "Note: $repl not found; skip replacing $orig"
+            fi
+          }
+          patch_one qgc_logo_full.png
+          patch_one title_logo.png
+          patch_one splash_logo.png
+          patch_one about_logo.png
+          patch_one appbar_logo.png
 
       - name: Build APK
         run: |
           set -e
-          cd work
-          apktool b decoded -o unsigned.apk
-          ls -lh unsigned.apk
+          cd work/decoded
+          apktool b -f -o ../unsigned.apk
+          ls -lh ../unsigned.apk
 
-      - name: Sign & align APK (uber-apk-signer)
+      - name: Sign & align APK
         run: |
           set -e
-          java -jar uber-apk-signer.jar -a work/unsigned.apk -o out --ksAlias=androiddebugkey --overwrite
-          ls -lh out
+          cd work
+          java -jar ../uber-apk-signer.jar --overwrite --allowResign -a unsigned.apk
+          ls -lh unsigned-aligned-signed.apk || true
+          # Fall back to auto-detected output name if needed
+          SIGNED=$(ls *-aligned-signed.apk | head -n1)
+          mv "$SIGNED" Aeronics-GCS.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Aeronics-GCS.apk
-          path: out/*-aligned-debugSigned.apk
+          path: work/Aeronics-GCS.apk
