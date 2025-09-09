@@ -1,4 +1,4 @@
-name: Build Aeronics GCS from QGC source (Android, Qt 5.15.2)
+name: Build Aeronics GCS from QGC source (auto-detect Qt5/Qt6)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         default: "mavlink/qgroundcontrol"
       QGC_REF:
-        description: "Branch/tag (use v5.0.6 to match your APK)"
+        description: "Branch/tag (e.g. v5.0.6 or master)"
         required: true
         default: "v5.0.6"
       APP_NAME:
@@ -32,12 +32,6 @@ jobs:
   android:
     runs-on: ubuntu-22.04
 
-    env:
-      QT_VERSION: "5.15.2"                 # QGC v5 needs Qt5
-      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
-      ANDROID_NDK_VERSION: "21.4.7075529"  # NDK r21d pairs well with Qt 5.15.2
-      JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
-
     steps:
       - name: Checkout branding repo (this repo)
         uses: actions/checkout@v4
@@ -47,10 +41,42 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y unzip git build-essential ninja-build ccache wget jq p7zip-full imagemagick
 
-      # -------- ANDROID SDK / CMDLINE-TOOLS ----------
+      # -------- FETCH QGC SOURCE FIRST (so we can detect Qt major) --------
+      - name: Fetch QGroundControl source
+        run: |
+          set -e
+          git clone --recursive https://github.com/${{ github.event.inputs.QGC_REPO }}.git qgc
+          cd qgc
+          git fetch --all --tags
+          git checkout "${{ github.event.inputs.QGC_REF }}"
+          git submodule update --init --recursive
+          echo "Top CMakeLists snippet:"
+          sed -n '1,220p' CMakeLists.txt | sed -n '160,200p'
+
+      - name: Detect Qt major (5 or 6)
+        id: detect
+        run: |
+          set -e
+          if grep -q "find_package(Qt6" qgc/CMakeLists.txt; then
+            echo "qt_major=6" >> $GITHUB_OUTPUT
+            echo "QT_MAJOR=6" >> $GITHUB_ENV
+            # Reasonable working versions for QGC with Qt6
+            echo "QT_VERSION=6.5.3" >> $GITHUB_ENV
+            echo "ANDROID_NDK_VERSION=25.2.9519653" >> $GITHUB_ENV
+          else
+            echo "qt_major=5" >> $GITHUB_OUTPUT
+            echo "QT_MAJOR=5" >> $GITHUB_ENV
+            echo "QT_VERSION=5.15.2" >> $GITHUB_ENV
+            echo "ANDROID_NDK_VERSION=21.4.7075529" >> $GITHUB_ENV
+          fi
+          echo "Qt major selected: ${{ steps.detect.outputs.qt_major }}"
+
+      # -------- ANDROID SDK / CMDLINE-TOOLS (uses detected NDK) ----------
       - name: Install Android SDK + cmdline-tools
         run: |
           set -e
+          export ANDROID_SDK_ROOT="${{ github.workspace }}/android-sdk"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
           cd "$ANDROID_SDK_ROOT"
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
@@ -60,11 +86,12 @@ jobs:
           rm -rf cmdline-tools-tmp
           yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses
           yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
-            "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;${{ env.ANDROID_NDK_VERSION }}"
+            "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;${ANDROID_NDK_VERSION}"
 
-      # -------- QT 5.15.2 (HOST + ANDROID) ----------
-      - name: Install Qt host (Linux desktop tools incl. androiddeployqt)
-        id: qt-host
+      # -------- INSTALL QT (HOST TOOLS + ANDROID), CONDITIONALLY ----------
+      - name: Install Qt host (desktop tools inc. androiddeployqt) - Qt6
+        if: steps.detect.outputs.qt_major == '6'
+        id: qt-host-6
         uses: jurplel/install-qt-action@v3
         with:
           version: ${{ env.QT_VERSION }}
@@ -72,25 +99,35 @@ jobs:
           target: desktop
           arch: gcc_64
 
-      - name: Install Qt for Android (Qt 5.15.2 full)
-        id: qt-android
+      - name: Install Qt for Android - Qt6
+        if: steps.detect.outputs.qt_major == '6'
+        id: qt-android-6
         uses: jurplel/install-qt-action@v3
         with:
           version: ${{ env.QT_VERSION }}
           host: linux
           target: android
 
-      # -------- QGC SOURCE + BRANDING ----------
-      - name: Fetch QGroundControl source
-        run: |
-          set -e
-          git clone --recursive https://github.com/${{ github.event.inputs.QGC_REPO }}.git qgc
-          cd qgc
-          git fetch --all --tags
-          git checkout "${{ github.event.inputs.QGC_REF }}"
-          git submodule update --init --recursive
-          ls -la
+      - name: Install Qt host (desktop tools inc. androiddeployqt) - Qt5
+        if: steps.detect.outputs.qt_major == '5'
+        id: qt-host-5
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: desktop
+          arch: gcc_64
 
+      - name: Install Qt for Android - Qt5
+        if: steps.detect.outputs.qt_major == '5'
+        id: qt-android-5
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: android
+
+      # -------- APPLY BRANDING ----------
       - name: Apply Aeronics branding to source
         run: |
           set -e
@@ -112,7 +149,7 @@ jobs:
           </resources>
           EOF
 
-          # 2) In-app icons used by QML/menus
+          # 2) In-app icons
           mkdir -p qgc/resources/icons
           cp "$INAPP" qgc/resources/icons/aeronics_logo.png
           for f in qgc_logo_full.png qground_toolbar_logo.png qgc_splash.png appbar_logo.png about_logo.png title_logo.png; do
@@ -132,36 +169,60 @@ jobs:
             cp qgc/android/res/mipmap-$d/ic_launcher.png qgc/android/res/mipmap-$d/ic_launcher_round.png
           done
 
-          # 4) Brand text in QML
+          # 4) Replace brand text in QML
           grep -RIl --null -e 'QGroundControl' qgc | xargs -0 -r sed -i "s/QGroundControl/${APPNAME}/g"
 
-      # -------- CMAKE (FORCE QT5) ----------
-      - name: Configure (Qt 5 + Android)
+      # -------- CONFIGURE & BUILD (separate blocks for Qt6 / Qt5) ----------
+      - name: Configure & Build (Qt6)
+        if: steps.detect.outputs.qt_major == '6'
         env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
           ANDROID_NDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_VERSION }}
-          CMAKE_PREFIX_PATH: ${{ steps.qt-android.outputs.QT_INSTALL_DIR }}
+          QT_ANDROID_DIR: ${{ steps.qt-android-6.outputs.QT_INSTALL_DIR }}
+          QT_HOST_DIR: ${{ steps.qt-host-6.outputs.QT_INSTALL_DIR }}
         run: |
           set -e
-          mkdir -p build-android
-          cd build-android
+          mkdir -p build-android && cd build-android
           cmake ../qgc -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-24 \
-            -DQT_HOST_PATH=${{ steps.qt-host.outputs.QT_INSTALL_DIR }} \
-            -DQt5_DIR=${{ steps.qt-android.outputs.QT_INSTALL_DIR }}/lib/cmake/Qt5 \
-            -DQT_QMAKE_EXECUTABLE=${{ steps.qt-android.outputs.QT_INSTALL_DIR }}/bin/qmake \
-            -DQt5Core_DIR=${{ steps.qt-android.outputs.QT_INSTALL_DIR }}/lib/cmake/Qt5Core \
-            -DQt5Gui_DIR=${{ steps.qt-android.outputs.QT_INSTALL_DIR }}/lib/cmake/Qt5Gui \
-            -DQt5Qml_DIR=${{ steps.qt-android.outputs.QT_INSTALL_DIR }}/lib/cmake/Qt5Qml \
-            -DQt5Quick_DIR=${{ steps.qt-android.outputs.QT_INSTALL_DIR }}/lib/cmake/Qt5Quick \
-            -DQt5Widgets_DIR=${{ steps.qt-android.outputs.QT_INSTALL_DIR }}/lib/cmake/Qt5Widgets
+            -DQt6_DIR=${QT_ANDROID_DIR}/lib/cmake/Qt6 \
+            -DQT_HOST_PATH=${QT_HOST_DIR} \
+            -DQT_ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT} \
+            -DQT_ANDROID_NDK_ROOT=${ANDROID_NDK_ROOT}
           ninja
 
-      # -------- PACKAGE & ARTIFACT ----------
-      - name: Package APK (androiddeployqt from Qt5 host)
+      - name: Configure & Build (Qt5)
+        if: steps.detect.outputs.qt_major == '5'
         env:
-          PATH: ${{ steps.qt-host.outputs.QT_INSTALL_DIR }}/bin:${{ env.PATH }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+          QT_ANDROID_DIR: ${{ steps.qt-android-5.outputs.QT_INSTALL_DIR }}
+          QT_HOST_DIR: ${{ steps.qt-host-5.outputs.QT_INSTALL_DIR }}
+        run: |
+          set -e
+          mkdir -p build-android && cd build-android
+          cmake ../qgc -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DQt5_DIR=${QT_ANDROID_DIR}/lib/cmake/Qt5 \
+            -DQT_QMAKE_EXECUTABLE=${QT_ANDROID_DIR}/bin/qmake \
+            -DQt5Core_DIR=${QT_ANDROID_DIR}/lib/cmake/Qt5Core \
+            -DQt5Gui_DIR=${QT_ANDROID_DIR}/lib/cmake/Qt5Gui \
+            -DQt5Qml_DIR=${QT_ANDROID_DIR}/lib/cmake/Qt5Qml \
+            -DQt5Quick_DIR=${QT_ANDROID_DIR}/lib/cmake/Qt5Quick \
+            -DQt5Widgets_DIR=${QT_ANDROID_DIR}/lib/cmake/Qt5Widgets \
+            -DQT_HOST_PATH=${QT_HOST_DIR} \
+            -DQT_ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT} \
+            -DQT_ANDROID_NDK_ROOT=${ANDROID_NDK_ROOT}
+          ninja
+
+      # -------- PACKAGE ----------
+      - name: Package APK (androiddeployqt)
+        env:
+          PATH: ${{ steps.qt-host-6.outputs.QT_INSTALL_DIR }}/bin:${{ steps.qt-host-5.outputs.QT_INSTALL_DIR }}/bin:${{ env.PATH }}
         run: |
           set -e
           cd build-android
