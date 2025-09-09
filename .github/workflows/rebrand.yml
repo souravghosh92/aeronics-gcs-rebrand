@@ -12,13 +12,17 @@ on:
         required: true
         default: "Aeronics GCS"
       ICON_PATH:
-        description: "Path to 512x512 PNG inside repo"
+        description: "Path to 512x512 PNG inside repo (launcher icon source)"
         required: true
         default: "branding/aeronics_icon_512.png"
       PACKAGE_ID:
         description: "(Optional) New package id, e.g. in.aeronics.gcs (keeps original if blank)"
         required: false
         default: ""
+      INAPP_LOGO:
+        description: "(Optional) In-app Aeronics logo PNG (transparent). Falls back to ICON_PATH if blank/missing."
+        required: false
+        default: "branding/overrides/assets/qml/images/aeronics_logo.png"
 
 jobs:
   rebrand:
@@ -32,7 +36,7 @@ jobs:
         run: |
           set -e
           sudo apt-get update
-          sudo apt-get install -y openjdk-17-jre-headless wget unzip rsync imagemagick
+          sudo apt-get install -y openjdk-17-jre-headless wget unzip rsync imagemagick jq
           # apktool
           sudo curl -L -o /usr/local/bin/apktool https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
           sudo chmod +x /usr/local/bin/apktool
@@ -78,54 +82,6 @@ jobs:
           sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' work/decoded/AndroidManifest.xml || true
           sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' work/decoded/AndroidManifest.xml || true
 
-      # ---------- BRANDING: In-app images ----------
-      # Put your Aeronics logo at: branding/overrides/assets/qml/images/aeronics_logo.png
-      - name: Replace in-app Q logos (toolbar/splash/about)
-        run: |
-          set -e
-          SRC_LOGO="$GITHUB_WORKSPACE/branding/overrides/assets/qml/images/aeronics_logo.png"
-          IMG_DST="work/decoded/assets/qml/images"
-          mkdir -p "$IMG_DST"
-          if [ -f "$SRC_LOGO" ]; then
-            cp "$SRC_LOGO" "$IMG_DST/aeronics_logo.png"
-          else
-            echo "::warning ::No Aeronics in-app logo found at $SRC_LOGO (skipping image swap)"; 
-          fi
-
-          echo "== Existing logo-ish assets =="
-          find work/decoded -type f -iregex '.*\(logo\|qgc.*\|qground.*\).*\.\(png\|svg\)' | sed -n '1,200p' || true
-
-          # Overwrite common QGC/QGroundControl logo filenames if present
-          for f in qground_toolbar_logo.png qgc_logo_full.png appbar_logo.png title_logo.png splash_logo.png about_logo.png qgc_splash.png; do
-            if [ -f "$IMG_DST/$f" ] && [ -f "$IMG_DST/aeronics_logo.png" ]; then
-              echo "Overriding $f -> aeronics_logo.png"
-              cp "$IMG_DST/aeronics_logo.png" "$IMG_DST/$f"
-            fi
-          done
-
-          # Rewrite QML references to point to aeronics_logo.png
-          if [ -d work/decoded/assets/qml ]; then
-            grep -RIl --null -e 'qground_toolbar_logo.png\|qgc_logo_full.png\|appbar_logo.png\|title_logo.png\|splash_logo.png\|about_logo.png\|qgc_splash.png' work/decoded/assets/qml \
-            | xargs -0 -r sed -i 's/qground_toolbar_logo.png/aeronics_logo.png/g; s/qgc_logo_full.png/aeronics_logo.png/g; s/appbar_logo.png/aeronics_logo.png/g; s/title_logo.png/aeronics_logo.png/g; s/splash_logo.png/aeronics_logo.png/g; s/about_logo.png/aeronics_logo.png/g; s/qgc_splash.png/aeronics_logo.png/g'
-          fi
-
-          echo "== Remaining Q* logo refs (should be empty) =="
-          grep -RIn 'qgc.*logo\|qground.*logo' work/decoded/assets/qml || true
-
-      # Optional: overlay any extra images you drop in the repo
-      - name: Overlay extra QML images (optional)
-        run: |
-          set -e
-          SRC_DIR="$GITHUB_WORKSPACE/branding/overrides/assets/qml/images"
-          DST_DIR="work/decoded/assets/qml/images"
-          mkdir -p "$DST_DIR"
-          if [ -d "$SRC_DIR" ]; then
-            rsync -av --no-perms --no-owner --no-group "$SRC_DIR/" "$DST_DIR/"
-          else
-            echo "No additional QML image overrides at $SRC_DIR (skipping)."
-          fi
-          ls -la "$DST_DIR" | sed -n '1,200p' || true
-
       # ---------- BRANDING: Names/strings ----------
       - name: Patch in-app name (strings + manifest + assets/QML text)
         run: |
@@ -150,7 +106,7 @@ jobs:
           </resources>
           EOF
 
-          # Replace hard-coded brand strings in assets (About/QML text)
+          # Replace hard-coded brand strings inside assets (About/QML text)
           if [ -d work/decoded/assets ]; then
             grep -RIl --null -e 'QGroundControl' work/decoded/assets | xargs -0 -r sed -i "s/QGroundControl/${APPNAME}/g"
             grep -RIl --null -e 'Mission Planner' work/decoded/assets | xargs -0 -r sed -i "s/Mission Planner/${APPNAME}/g"
@@ -160,6 +116,67 @@ jobs:
           find work/decoded/res -type f -name '*.xml' -print0 | xargs -0 -r sed -i 's/android:title="[^"]*"/android:title="@string\/app_name"/g'
 
           echo "✔ In-app name set to: ${APPNAME}"
+
+      # ---------- BRANDING: In-app logos (FORCE) ----------
+      # Requires: branding/overrides/assets/qml/images/aeronics_logo.png  (or falls back to ICON_PATH)
+      - name: Force override all in-app logos
+        run: |
+          set -e
+          SRC_DIR="$GITHUB_WORKSPACE/branding/overrides/assets/qml/images"
+          DST_DIR="work/decoded/assets/qml/images"
+          mkdir -p "$DST_DIR"
+
+          # Choose in-app logo source
+          INAPP="${{ github.event.inputs.INAPP_LOGO }}"
+          if [ ! -f "$INAPP" ]; then
+            INAPP="${{ github.event.inputs.ICON_PATH }}"
+            echo "::warning ::INAPP_LOGO not found; falling back to ICON_PATH ($INAPP)"
+          fi
+          test -f "$INAPP" || { echo "::error ::No logo file found (INAPP_LOGO/ICON_PATH)"; exit 1; }
+
+          # Copy all your custom images in (keeps filenames you've provided)
+          if [ -d "$SRC_DIR" ]; then
+            rsync -av --no-perms --no-owner --no-group "$SRC_DIR/" "$DST_DIR/"
+          fi
+
+          # Ensure we have a canonical aeronics_logo.png to use as source
+          cp "$INAPP" "$DST_DIR/aeronics_logo.png"
+
+          echo "== Candidate QGC logo/image files inside APK (before) =="
+          find "$DST_DIR" -type f \( -iname '*logo*.png' -o -iname '*logo*.svg' -o -iname 'qg*.png' -o -iname 'qg*.svg' -o -iname 'qground*.png' -o -iname 'qground*.svg' \) | sort | sed -n '1,200p' || true
+
+          # Overwrite common names directly with our aeronics logo
+          for f in qground_toolbar_logo.png qgc_logo_full.png appbar_logo.png title_logo.png splash_logo.png about_logo.png qgc_splash.png; do
+            if [ -f "$DST_DIR/$f" ]; then
+              echo "Overwriting $f -> aeronics_logo.png"
+              cp "$DST_DIR/aeronics_logo.png" "$DST_DIR/$f"
+            fi
+          done
+
+          # Aggressive pass: replace any png/svg with qg*/qground*/logo* in name, preserving size
+          while IFS= read -r file; do
+            ext="${file##*.}"
+            if [ "$ext" = "png" ]; then
+              W=$(identify -format "%w" "$file" 2>/dev/null || echo 256)
+              H=$(identify -format "%h" "$file" 2>/dev/null || echo 256)
+              echo "Reskin $file -> Aeronics ($W x $H)"
+              convert "$DST_DIR/aeronics_logo.png" -resize "${W}x${H}" "$file"
+            else
+              # SVG: replace with PNG of same base name
+              echo "Replacing SVG $file with PNG"
+              convert "$DST_DIR/aeronics_logo.png" -resize 256x256 "${file%.*}.png"
+              rm -f "$file"
+            fi
+          done < <(find "$DST_DIR" -type f \( -iname '*logo*.png' -o -iname '*logo*.svg' -o -iname 'qg*.png' -o -iname 'qg*.svg' -o -iname 'qground*.png' -o -iname 'qground*.svg' \) | sort)
+
+          # Rewrite any QML references by filename to our aeronics_logo.png
+          if [ -d work/decoded/assets/qml ]; then
+            grep -RIl --null -e 'qground_.*logo\|qgc_.*logo\|appbar_logo\.png\|title_logo\.png\|splash_logo\.png\|about_logo\.png\|qgc_splash\.png' work/decoded/assets/qml \
+            | xargs -0 -r sed -i 's/[A-Za-z0-9_]*logo\.png/aeronics_logo.png/g; s/qgc_splash\.png/aeronics_logo.png/g'
+          fi
+
+          echo "== Remaining QGC logo refs (should be empty) =="
+          grep -RIn 'qgc.*logo\|qground.*logo' work/decoded/assets/qml || true
 
       # ---------- BUILD + SIGN ----------
       - name: Build APK with apktool
