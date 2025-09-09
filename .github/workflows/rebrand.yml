@@ -1,182 +1,159 @@
-name: Rebrand QGC/Mission Planner APK to Aeronics GCS (full)
+name: Build Aeronics GCS from QGC source (Android)
 
 on:
   workflow_dispatch:
     inputs:
-      APK_URL:
-        description: "Direct download URL of base APK"
+      QGC_REPO:
+        description: "QGroundControl repo to build"
         required: true
-        default: "https://github.com/souravghosh92/aeronics-gcs-rebrand/releases/download/Base.apk/base.apk"
+        default: "mavlink/qgroundcontrol"
+      QGC_REF:
+        description: "Branch/tag (match your base APK major version; try v5.0.6 or master)"
+        required: true
+        default: "v5.0.6"
       APP_NAME:
-        description: "Visible in-app name"
+        description: "Visible app name"
         required: true
         default: "Aeronics GCS"
       ICON_PATH:
-        description: "Path to 512x512 PNG inside repo (launcher icon source)"
+        description: "512x512 PNG in your repo for launcher"
         required: true
         default: "branding/aeronics_icon_512.png"
       INAPP_LOGO:
-        description: "(Optional) In-app Aeronics logo PNG. If missing, ICON_PATH is used."
+        description: "In-app logo PNG (transparent). Falls back to ICON_PATH if missing."
         required: false
         default: "branding/overrides/assets/qml/images/aeronics_logo.png"
       PACKAGE_ID:
-        description: "(Optional) New package id, e.g. in.aeronics.gcs (keep blank to keep original)"
+        description: "(Optional) New package id, e.g. in.aeronics.gcs (leave blank to keep default)"
         required: false
         default: ""
 
 jobs:
-  rebrand:
-    runs-on: ubuntu-latest
+  android:
+    runs-on: ubuntu-22.04
+
+    env:
+      QT_VERSION: "6.5.3"             # if v5 fails, set 5.15.2 and the Qt installer bits (QGC ≥5 usually uses Qt6)
+      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+      ANDROID_NDK_VERSION: "25.2.9519653"
+      JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
 
     steps:
-      - name: Checkout repo
+      - name: Checkout branding repo (yours)
         uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Install build deps
         run: |
-          set -e
           sudo apt-get update
-          sudo apt-get install -y openjdk-17-jre-headless wget unzip rsync imagemagick jq
-          sudo curl -L -o /usr/local/bin/apktool https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
-          sudo chmod +x /usr/local/bin/apktool
-          sudo curl -L -o /usr/local/lib/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
+          sudo apt-get install -y unzip git build-essential ninja-build ccache wget jq p7zip-full imagemagick
 
-      - name: Download base APK
+      - name: Install Android SDK + cmdline-tools
         run: |
-          set -e
-          mkdir -p work
-          cd work
-          echo "Downloading: ${{ github.event.inputs.APK_URL }}"
-          wget -O base.apk "${{ github.event.inputs.APK_URL }}"
-          ls -lh base.apk
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          cd "$ANDROID_SDK_ROOT"
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
+          unzip -q cmdtools.zip
+          mv cmdline-tools cmdline-tools/latest
+          rm -f cmdtools.zip
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
+            "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;${{ env.ANDROID_NDK_VERSION }}"
 
-      - name: Decode APK
+      - name: Install Qt (Android)
         run: |
-          set -e
-          cd work
-          java -jar /usr/local/lib/apktool.jar d -f -o decoded base.apk
-          ls -la decoded | sed -n '1,120p'
+          # Try a couple mirrors
+          wget -q https://download.qt.io/official_releases/qt/${{ env.QT_VERSION%%.* }}/${{ env.QT_VERSION }}/qt-opensource-linux-x64-${{ env.QT_VERSION }}.7z -O qt.7z || \
+          wget -q https://mirrors.ocf.berkeley.edu/qt/official_releases/qt/${{ env.QT_VERSION%%.* }}/${{ env.QT_VERSION }}/qt-opensource-linux-x64-${{ env.QT_VERSION }}.7z -O qt.7z
+          mkdir -p $HOME/Qt
+          7z x qt.7z -o$HOME/Qt > /dev/null
+          echo "$HOME/Qt/${{ env.QT_VERSION }}/android_arm64_v8a/bin" >> $GITHUB_PATH
+          echo "$HOME/Qt/${{ env.QT_VERSION }}/gcc_64/bin" >> $GITHUB_PATH
 
-      # ---------- Launcher icon ----------
-      - name: Generate launcher mipmaps from 512x512
+      - name: Fetch QGroundControl source
         run: |
-          set -e
-          ICON="${{ github.event.inputs.ICON_PATH }}"
-          test -f "$ICON" || { echo "::error ::Icon not found at $ICON"; exit 1; }
-          mkdir -p work/decoded/res/mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}
-          convert "$ICON" -resize 48x48   work/decoded/res/mipmap-mdpi/ic_launcher.png
-          convert "$ICON" -resize 72x72   work/decoded/res/mipmap-hdpi/ic_launcher.png
-          convert "$ICON" -resize 96x96   work/decoded/res/mipmap-xhdpi/ic_launcher.png
-          convert "$ICON" -resize 144x144 work/decoded/res/mipmap-xxhdpi/ic_launcher.png
-          convert "$ICON" -resize 192x192 work/decoded/res/mipmap-xxxhdpi/ic_launcher.png
-          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
-            cp work/decoded/res/mipmap-$d/ic_launcher.png work/decoded/res/mipmap-$d/ic_launcher_round.png
-          done
-          sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' work/decoded/AndroidManifest.xml || true
-          sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' work/decoded/AndroidManifest.xml || true
+          git clone --recursive https://github.com/${{ github.event.inputs.QGC_REPO }}.git qgc
+          cd qgc
+          git fetch --all --tags
+          git checkout "${{ github.event.inputs.QGC_REF }}"
+          git submodule update --init --recursive
+          ls -la
 
-      # ---------- App name + texts ----------
-      - name: Patch in-app name (strings + manifest + assets text)
+      - name: Apply Aeronics branding to source
         run: |
           set -e
           APPNAME="${{ github.event.inputs.APP_NAME }}"
-          # make manifest read from @string/app_name
-          sed -i 's/android:label="[^"]*"/android:label="@string\/app_name"/' work/decoded/AndroidManifest.xml || true
-          # optional new package id
+          INAPP="${{ github.event.inputs.INAPP_LOGO }}"
+          ICON="${{ github.event.inputs.ICON_PATH }}"
+          [ -f "$ICON" ] || { echo "::error ::ICON_PATH not found: $ICON"; exit 1; }
+          if [ ! -f "$INAPP" ]; then INAPP="$ICON"; fi
+
+          # 1) Change Android label + (optional) package id
+          # QGC Android manifest sits under ./android/AndroidManifest.xml
+          sed -i 's/android:label="[^"]*"/android:label="@string\/app_name"/' qgc/android/AndroidManifest.xml || true
           if [ -n "${{ github.event.inputs.PACKAGE_ID }}" ]; then
-            sed -i 's/package="\([^"]*\)"/package="${{ github.event.inputs.PACKAGE_ID }}"/' work/decoded/AndroidManifest.xml || true
+            sed -i 's/package="\([^"]*\)"/package="${{ github.event.inputs.PACKAGE_ID }}"/' qgc/android/AndroidManifest.xml || true
           fi
-          # add our strings
-          mkdir -p work/decoded/res/values
-          cat > work/decoded/res/values/strings_aeronics.xml <<EOF
+          mkdir -p qgc/resources/strings
+          cat > qgc/resources/strings/strings_aeronics.xml <<EOF
           <resources>
             <string name="app_name">${APPNAME}</string>
-            <string name="brand_name">Aeronics</string>
-            <string name="app_full_name">${APPNAME}</string>
           </resources>
           EOF
-          # replace plain text mentions inside assets
-          if [ -d work/decoded/assets ]; then
-            grep -RIl --null -e 'QGroundControl' work/decoded/assets | xargs -0 -r sed -i "s/QGroundControl/${APPNAME}/g"
-            grep -RIl --null -e 'Mission Planner' work/decoded/assets | xargs -0 -r sed -i "s/Mission Planner/${APPNAME}/g"
-          fi
-          # normalize any android:title="..."
-          find work/decoded/res -type f -name '*.xml' -print0 | xargs -0 -r sed -i 's/android:title="[^"]*"/android:title="@string\/app_name"/g'
 
-      # ---------- In-app logos (assets/qml/images) ----------
-      - name: Replace QGC logos inside assets/qml/images
-        run: |
-          set -e
-          INAPP="${{ github.event.inputs.INAPP_LOGO }}"
-          if [ ! -f "$INAPP" ]; then INAPP="${{ github.event.inputs.ICON_PATH }}"; fi
-          test -f "$INAPP" || { echo "::error ::No Aeronics logo found (INAPP_LOGO/ICON_PATH)"; exit 1; }
-          IMG_DIR="work/decoded/assets/qml/images"
-          mkdir -p "$IMG_DIR"
-          cp "$INAPP" "$IMG_DIR/aeronics_logo.png"
-          # overwrite common names
-          for f in qground_toolbar_logo.png qgc_logo_full.png appbar_logo.png title_logo.png splash_logo.png about_logo.png qgc_splash.png; do
-            if [ -f "$IMG_DIR/$f" ]; then cp "$IMG_DIR/aeronics_logo.png" "$IMG_DIR/$f"; fi
+          # 2) Replace in-app logos used by QML and menus
+          mkdir -p qgc/resources/icons
+          cp "$INAPP" qgc/resources/icons/aeronics_logo.png
+
+          # Overwrite common QGC icons with ours (these names are used throughout QGC)
+          for f in qgc_logo_full.png qground_toolbar_logo.png qgc_splash.png appbar_logo.png about_logo.png title_logo.png; do
+            if [ -f "qgc/resources/icons/$f" ]; then
+              cp "$INAPP" "qgc/resources/icons/$f"
+            fi
           done
-          # rewrite QML references
-          if [ -d work/decoded/assets/qml ]; then
-            grep -RIl --null -e 'qground_.*logo\|qgc_.*logo\|appbar_logo\.png\|title_logo\.png\|splash_logo\.png\|about_logo\.png\|qgc_splash\.png' work/decoded/assets/qml \
-            | xargs -0 -r sed -i 's/[A-Za-z0-9_]*logo\.png/aeronics_logo.png/g; s/qgc_splash\.png/aeronics_logo.png/g'
-          fi
 
-      # ---------- ANDROID RES drawables (THIS fixes the two purple Q icons) ----------
-      - name: Replace Android drawable refs to Aeronics icon
+          # 3) Launcher mipmaps in QGC android project
+          mkdir -p qgc/android/res/mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}
+          convert "$ICON" -resize 48x48   qgc/android/res/mipmap-mdpi/ic_launcher.png
+          convert "$ICON" -resize 72x72   qgc/android/res/mipmap-hdpi/ic_launcher.png
+          convert "$ICON" -resize 96x96   qgc/android/res/mipmap-xhdpi/ic_launcher.png
+          convert "$ICON" -resize 144x144 qgc/android/res/mipmap-xxhdpi/ic_launcher.png
+          convert "$ICON" -resize 192x192 qgc/android/res/mipmap-xxxhdpi/ic_launcher.png
+          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            cp qgc/android/res/mipmap-$d/ic_launcher.png qgc/android/res/mipmap-$d/ic_launcher_round.png
+          done
+
+          # 4) Replace brand text inside QML
+          grep -RIl --null -e 'QGroundControl' qgc | xargs -0 -r sed -i "s/QGroundControl/${APPNAME}/g"
+
+      - name: Configure (Qt + Android)
+        env:
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_VERSION }}
         run: |
           set -e
-          INAPP="${{ github.event.inputs.INAPP_LOGO }}"
-          if [ ! -f "$INAPP" ]; then INAPP="${{ github.event.inputs.ICON_PATH }}"; fi
-          test -f "$INAPP" || { echo "::error ::No Aeronics logo found (INAPP_LOGO/ICON_PATH)"; exit 1; }
+          mkdir -p build-android
+          cd build-android
+          cmake ../qgc -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DQT_HOST_PATH=$HOME/Qt/${{ env.QT_VERSION }}/gcc_64 \
+            -DQT_ANDROID_SDK_ROOT=${{ env.ANDROID_SDK_ROOT }} \
+            -DQT_ANDROID_NDK_ROOT=${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+          ninja
 
-          # create our drawable at multiple densities
-          mkdir -p work/decoded/res/drawable-{nodpi,hdpi,xhdpi,xxhdpi,xxxhdpi}
-          cp "$INAPP"                               work/decoded/res/drawable-nodpi/aero_appicon.png
-          convert "$INAPP" -resize 72x72            work/decoded/res/drawable-hdpi/aero_appicon.png
-          convert "$INAPP" -resize 96x96            work/decoded/res/drawable-xhdpi/aero_appicon.png
-          convert "$INAPP" -resize 144x144          work/decoded/res/drawable-xxhdpi/aero_appicon.png
-          convert "$INAPP" -resize 192x192          work/decoded/res/drawable-xxxhdpi/aero_appicon.png
-
-          echo "Before rewrite (examples):"
-          grep -RIn --include='*.xml' -e '@drawable/[^"]*qgc' -e '@drawable/[^"]*qground' -e '@drawable/[^"]*logo' work/decoded/res | sed -n '1,80p' || true
-
-          # point any @drawable/qgc*, @drawable/qground*, @drawable/*logo* to our aero_appicon
-          find work/decoded/res -type f -name '*.xml' -print0 | xargs -0 -r \
-            sed -i -E 's/@drawable\/([A-Za-z0-9_]*qgc[A-Za-z0-9_]*)/@drawable\/aero_appicon/g;
-                        s/@drawable\/([A-Za-z0-9_]*qground[A-Za-z0-9_]*)/@drawable\/aero_appicon/g;
-                        s/@drawable\/([A-Za-z0-9_]*logo[A-Za-z0-9_]*)/@drawable\/aero_appicon/g'
-
-          # sometimes menus use @mipmap/qgc_* — redirect to our launcher
-          find work/decoded/res -type f -name '*.xml' -print0 | xargs -0 -r \
-            sed -i -E 's/@mipmap\/(qgc[^"]*|qground[^"]*|logo[^"]*)/@mipmap\/ic_launcher/g'
-
-          echo "After rewrite (should show aero_appicon):"
-          grep -RIn --include='*.xml' -e '@drawable/[^"]*aero_appicon' work/decoded/res | sed -n '1,80p' || true
-
-      # ---------- Build + Sign ----------
-      - name: Build APK with apktool
+      - name: Package APK (androiddeployqt)
+        env:
+          PATH: $HOME/Qt/${{ env.QT_VERSION }}/android_arm64_v8a/bin:$PATH
         run: |
           set -e
-          cd work/decoded
-          java -jar /usr/local/lib/apktool.jar b -f -o ../unsigned.apk
-          ls -lh ../unsigned.apk
-
-      - name: Sign & align APK (uber-apk-signer)
-        run: |
-          set -e
-          cd work
-          wget -q https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar -O signer.jar
-          java -jar signer.jar --apks unsigned.apk
-          echo "Signed APKs found:"
-          ls -lh *Signed.apk
-          APK_FILE=$(ls *-releaseSigned.apk 2>/dev/null || ls *-debugSigned.apk | head -n1)
-          cp "$APK_FILE" Aeronics-GCS.apk
-          ls -lh Aeronics-GCS.apk
+          cd build-android
+          APP_JSON=$(find . -name "*-android_deployment_settings.json" | head -n1)
+          [ -n "$APP_JSON" ] || { echo "::error ::android_deployment_settings.json not found"; exit 1; }
+          androiddeployqt --input "$APP_JSON" --output ./android-build --deployment bundled --gradle --release
+          find . -name "*.apk" -type f -print
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Aeronics-GCS
-          path: work/Aeronics-GCS.apk
+          name: Aeronics-GCS-from-source
+          path: "**/*.apk"
