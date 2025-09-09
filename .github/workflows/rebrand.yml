@@ -8,7 +8,7 @@ on:
         required: true
         default: "mavlink/qgroundcontrol"
       QGC_REF:
-        description: "Branch/tag (try v5.0.6 to match your screenshots, or master)"
+        description: "Branch/tag (use v5.0.6 to match your APK, or master)"
         required: true
         default: "v5.0.6"
       APP_NAME:
@@ -34,7 +34,6 @@ jobs:
 
     env:
       QT_VERSION: "6.5.3"
-      QT_MAJOR: "6"                       # keep simple to avoid expression errors
       ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
       ANDROID_NDK_VERSION: "25.2.9519653"
       JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
@@ -48,7 +47,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y unzip git build-essential ninja-build ccache wget jq p7zip-full imagemagick
 
-      # ---- FIXED: Android cmdline-tools install (uses a temp dir) ----
+      # ---- Android SDK / cmdline-tools (fixed flow with temp dir) ----
       - name: Install Android SDK + cmdline-tools
         run: |
           set -e
@@ -63,16 +62,24 @@ jobs:
           yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
             "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;${{ env.ANDROID_NDK_VERSION }}"
 
-      # Minimal Qt install for Android (prebuilt archives mirror); good enough for CI
-      - name: Install Qt (Android)
-        run: |
-          set -e
-          wget -q https://download.qt.io/official_releases/qt/${{ env.QT_MAJOR }}/${{ env.QT_VERSION }}/qt-opensource-linux-x64-${{ env.QT_VERSION }}.7z -O qt.7z || \
-          wget -q https://mirrors.ocf.berkeley.edu/qt/official_releases/qt/${{ env.QT_MAJOR }}/${{ env.QT_VERSION }}/qt-opensource-linux-x64-${{ env.QT_VERSION }}.7z -O qt.7z
-          mkdir -p $HOME/Qt
-          7z x qt.7z -o$HOME/Qt > /dev/null
-          echo "$HOME/Qt/${{ env.QT_VERSION }}/android_arm64_v8a/bin" >> $GITHUB_PATH
-          echo "$HOME/Qt/${{ env.QT_VERSION }}/gcc_64/bin" >> $GITHUB_PATH
+      # ---- Qt (install BOTH host tools and Android libs) ----
+      - name: Install Qt host (Linux desktop, tools like androiddeployqt)
+        id: qt-host
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: desktop
+          arch: gcc_64
+
+      - name: Install Qt for Android (arm64-v8a)
+        id: qt-android
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: android
+          arch: android_arm64_v8a
 
       - name: Fetch QGroundControl source
         run: |
@@ -93,7 +100,7 @@ jobs:
           [ -f "$ICON" ] || { echo "::error ::ICON_PATH not found: $ICON"; exit 1; }
           if [ ! -f "$INAPP" ]; then INAPP="$ICON"; fi
 
-          # 1) Change Android label + (optional) package id
+          # 1) Android manifest: app label (+ optional package id)
           sed -i 's/android:label="[^"]*"/android:label="@string\/app_name"/' qgc/android/AndroidManifest.xml || true
           if [ -n "${{ github.event.inputs.PACKAGE_ID }}" ]; then
             sed -i 's/package="\([^"]*\)"/package="${{ github.event.inputs.PACKAGE_ID }}"/' qgc/android/AndroidManifest.xml || true
@@ -105,7 +112,7 @@ jobs:
           </resources>
           EOF
 
-          # 2) Replace in-app logos used by QML and menus
+          # 2) In-app icons used by QML/menus
           mkdir -p qgc/resources/icons
           cp "$INAPP" qgc/resources/icons/aeronics_logo.png
           for f in qgc_logo_full.png qground_toolbar_logo.png qgc_splash.png appbar_logo.png about_logo.png title_logo.png; do
@@ -114,7 +121,7 @@ jobs:
             fi
           done
 
-          # 3) Launcher mipmaps for Android project
+          # 3) Launcher mipmaps
           mkdir -p qgc/android/res/mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}
           convert "$ICON" -resize 48x48   qgc/android/res/mipmap-mdpi/ic_launcher.png
           convert "$ICON" -resize 72x72   qgc/android/res/mipmap-hdpi/ic_launcher.png
@@ -125,12 +132,13 @@ jobs:
             cp qgc/android/res/mipmap-$d/ic_launcher.png qgc/android/res/mipmap-$d/ic_launcher_round.png
           done
 
-          # 4) Replace brand text in QML sources
+          # 4) Brand text in QML
           grep -RIl --null -e 'QGroundControl' qgc | xargs -0 -r sed -i "s/QGroundControl/${APPNAME}/g"
 
       - name: Configure (Qt + Android)
         env:
           ANDROID_NDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+          CMAKE_PREFIX_PATH: ${{ steps.qt-android.outputs.QT_INSTALL_DIR }}
         run: |
           set -e
           mkdir -p build-android
@@ -139,14 +147,15 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-24 \
-            -DQT_HOST_PATH=$HOME/Qt/${{ env.QT_VERSION }}/gcc_64 \
+            -DQT_HOST_PATH=${{ steps.qt-host.outputs.QT_INSTALL_DIR }} \
+            -DQt6_DIR=${{ steps.qt-android.outputs.QT_INSTALL_DIR }}/lib/cmake/Qt6 \
             -DQT_ANDROID_SDK_ROOT=${{ env.ANDROID_SDK_ROOT }} \
             -DQT_ANDROID_NDK_ROOT=${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_VERSION }}
           ninja
 
       - name: Package APK (androiddeployqt)
         env:
-          PATH: $HOME/Qt/${{ env.QT_VERSION }}/android_arm64_v8a/bin:$PATH
+          PATH: ${{ steps.qt-host.outputs.QT_INSTALL_DIR }}/bin:${{ env.PATH }}
         run: |
           set -e
           cd build-android
