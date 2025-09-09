@@ -1,4 +1,4 @@
-name: Build Aeronics GCS from QGC source (Android)
+name: Build Aeronics GCS from QGC source (Android, Qt 5.15.2)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         default: "mavlink/qgroundcontrol"
       QGC_REF:
-        description: "Branch/tag (use v5.0.6 to match your APK, or master)"
+        description: "Branch/tag (use v5.0.6 to match your APK)"
         required: true
         default: "v5.0.6"
       APP_NAME:
@@ -33,9 +33,10 @@ jobs:
     runs-on: ubuntu-22.04
 
     env:
-      QT_VERSION: "6.5.3"
+      # ---- Qt 5 + NDK r21d for QGC v5.x ----
+      QT_VERSION: "5.15.2"
       ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
-      ANDROID_NDK_VERSION: "25.2.9519653"
+      ANDROID_NDK_VERSION: "21.4.7075529"
       JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
 
     steps:
@@ -47,7 +48,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y unzip git build-essential ninja-build ccache wget jq p7zip-full imagemagick
 
-      # ---- Android SDK / cmdline-tools (fixed flow with temp dir) ----
+      # ---- Android SDK / cmdline-tools (robust install) ----
       - name: Install Android SDK + cmdline-tools
         run: |
           set -e
@@ -62,8 +63,8 @@ jobs:
           yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
             "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;${{ env.ANDROID_NDK_VERSION }}"
 
-      # ---- Qt (install BOTH host tools and Android libs) ----
-      - name: Install Qt host (Linux desktop, tools like androiddeployqt)
+      # ---- Qt 5.15.2 (both host tools and Android) ----
+      - name: Install Qt host (Linux desktop tools incl. androiddeployqt)
         id: qt-host
         uses: jurplel/install-qt-action@v3
         with:
@@ -100,7 +101,7 @@ jobs:
           [ -f "$ICON" ] || { echo "::error ::ICON_PATH not found: $ICON"; exit 1; }
           if [ ! -f "$INAPP" ]; then INAPP="$ICON"; fi
 
-          # 1) Android manifest: app label (+ optional package id)
+          # 1) Android manifest: app label + optional package id
           sed -i 's/android:label="[^"]*"/android:label="@string\/app_name"/' qgc/android/AndroidManifest.xml || true
           if [ -n "${{ github.event.inputs.PACKAGE_ID }}" ]; then
             sed -i 's/package="\([^"]*\)"/package="${{ github.event.inputs.PACKAGE_ID }}"/' qgc/android/AndroidManifest.xml || true
@@ -135,7 +136,7 @@ jobs:
           # 4) Brand text in QML
           grep -RIl --null -e 'QGroundControl' qgc | xargs -0 -r sed -i "s/QGroundControl/${APPNAME}/g"
 
-      - name: Configure (Qt + Android)
+      - name: Configure (Qt 5 + Android)
         env:
           ANDROID_NDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_VERSION }}
           CMAKE_PREFIX_PATH: ${{ steps.qt-android.outputs.QT_INSTALL_DIR }}
@@ -148,12 +149,12 @@ jobs:
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-24 \
             -DQT_HOST_PATH=${{ steps.qt-host.outputs.QT_INSTALL_DIR }} \
-            -DQt6_DIR=${{ steps.qt-android.outputs.QT_INSTALL_DIR }}/lib/cmake/Qt6 \
+            -DQt5_DIR=${{ steps.qt-android.outputs.QT_INSTALL_DIR }}/lib/cmake/Qt5 \
             -DQT_ANDROID_SDK_ROOT=${{ env.ANDROID_SDK_ROOT }} \
             -DQT_ANDROID_NDK_ROOT=${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_VERSION }}
           ninja
 
-      - name: Package APK (androiddeployqt)
+      - name: Package APK (androiddeployqt from Qt5 host)
         env:
           PATH: ${{ steps.qt-host.outputs.QT_INSTALL_DIR }}/bin:${{ env.PATH }}
         run: |
