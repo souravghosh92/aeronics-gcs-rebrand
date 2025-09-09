@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     env:
-      # ---- Qt 5 + NDK r21d for QGC v5.x ----
+      # QGC v5.x expects Qt 5 and NDK r21d
       QT_VERSION: "5.15.2"
       ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
       ANDROID_NDK_VERSION: "21.4.7075529"
@@ -63,7 +63,7 @@ jobs:
           yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
             "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;${{ env.ANDROID_NDK_VERSION }}"
 
-      # ---- Qt 5.15.2 (both host tools and Android) ----
+      # ---- Qt 5.15.2 (install host tools and Android) ----
       - name: Install Qt host (Linux desktop tools incl. androiddeployqt)
         id: qt-host
         uses: jurplel/install-qt-action@v3
@@ -73,14 +73,13 @@ jobs:
           target: desktop
           arch: gcc_64
 
-      - name: Install Qt for Android (arm64-v8a)
+      - name: Install Qt for Android (Qt 5.15.2 full)
         id: qt-android
         uses: jurplel/install-qt-action@v3
         with:
           version: ${{ env.QT_VERSION }}
           host: linux
           target: android
-          arch: android_arm64_v8a
 
       - name: Fetch QGroundControl source
         run: |
