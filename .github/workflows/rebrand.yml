@@ -154,7 +154,35 @@ jobs:
           else
             echo "No res/ overrides present (skipping)."
           fi
+# --- SET VISIBLE APP NAME + TEXT OVERRIDES ---
+      - name: Patch in-app name
+        run: |
+          set -e
+          APPNAME="${{ github.event.inputs.APP_NAME }}"
 
+          # 1) Force manifest to use @string/app_name
+          sed -i 's/android:label="[^"]*"/android:label="@string\/app_name"/' work/decoded/AndroidManifest.xml || true
+
+          # 2) Inject Aeronics strings overlay
+          mkdir -p work/decoded/res/values
+          cat > work/decoded/res/values/strings_aeronics.xml <<EOF
+          <resources>
+            <string name="app_name">${APPNAME}</string>
+            <string name="brand_name">Aeronics</string>
+            <string name="app_full_name">${APPNAME}</string>
+          </resources>
+          EOF
+
+          # 3) Replace hardcoded names in assets/QML/About
+          if [ -d work/decoded/assets ]; then
+            grep -RIl --null -e 'QGroundControl' work/decoded/assets | xargs -0 -r sed -i "s/QGroundControl/${APPNAME}/g"
+            grep -RIl --null -e 'Mission Planner' work/decoded/assets | xargs -0 -r sed -i "s/Mission Planner/${APPNAME}/g"
+          fi
+
+          # 4) Normalize titles in layouts
+          find work/decoded/res -type f -name '*.xml' -print0 | xargs -0 -r sed -i 's/android:title="[^"]*"/android:title="@string\/app_name"/g'
+
+          echo "✔ Patched in-app name to ${APPNAME}"
       - name: Build APK
         run: |
           set -e
