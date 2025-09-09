@@ -1,4 +1,4 @@
-name: Rebrand QGC/Mission Planner APK to Aeronics GCS
+name: Rebrand QGC/Mission Planner APK to Aeronics GCS (wide sweep)
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ on:
         required: false
         default: ""
       INAPP_LOGO:
-        description: "(Optional) In-app Aeronics logo PNG (transparent). Falls back to ICON_PATH if blank/missing."
+        description: "(Optional) In-app Aeronics logo PNG (transparent). Falls back to ICON_PATH if missing."
         required: false
         default: "branding/overrides/assets/qml/images/aeronics_logo.png"
 
@@ -37,7 +37,6 @@ jobs:
           set -e
           sudo apt-get update
           sudo apt-get install -y openjdk-17-jre-headless wget unzip rsync imagemagick jq
-          # apktool
           sudo curl -L -o /usr/local/bin/apktool https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
           sudo chmod +x /usr/local/bin/apktool
           sudo curl -L -o /usr/local/lib/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
@@ -58,45 +57,33 @@ jobs:
           java -jar /usr/local/lib/apktool.jar d -f -o decoded base.apk
           ls -la decoded | sed -n '1,200p'
 
-      # ---------- BRANDING: Launcher icons ----------
+      # ---------- Launcher icon ----------
       - name: Generate launcher mipmaps from 512x512
         run: |
           set -e
           ICON="${{ github.event.inputs.ICON_PATH }}"
           test -f "$ICON" || { echo "::error ::Icon not found at $ICON"; exit 1; }
-
-          mkdir -p work/decoded/res/mipmap-mdpi work/decoded/res/mipmap-hdpi work/decoded/res/mipmap-xhdpi work/decoded/res/mipmap-xxhdpi work/decoded/res/mipmap-xxxhdpi
-
+          mkdir -p work/decoded/res/mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}
           convert "$ICON" -resize 48x48   work/decoded/res/mipmap-mdpi/ic_launcher.png
           convert "$ICON" -resize 72x72   work/decoded/res/mipmap-hdpi/ic_launcher.png
           convert "$ICON" -resize 96x96   work/decoded/res/mipmap-xhdpi/ic_launcher.png
           convert "$ICON" -resize 144x144 work/decoded/res/mipmap-xxhdpi/ic_launcher.png
           convert "$ICON" -resize 192x192 work/decoded/res/mipmap-xxxhdpi/ic_launcher.png
-
-          # Round variants
           for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
             cp work/decoded/res/mipmap-$d/ic_launcher.png work/decoded/res/mipmap-$d/ic_launcher_round.png
           done
-
-          # Ensure manifest icons point to ours
           sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' work/decoded/AndroidManifest.xml || true
           sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' work/decoded/AndroidManifest.xml || true
 
-      # ---------- BRANDING: Names/strings ----------
-      - name: Patch in-app name (strings + manifest + assets/QML text)
+      # ---------- Names / strings ----------
+      - name: Patch in-app name (strings + manifest + assets text)
         run: |
           set -e
           APPNAME="${{ github.event.inputs.APP_NAME }}"
-
-          # Force manifest label to use @string/app_name
           sed -i 's/android:label="[^"]*"/android:label="@string\/app_name"/' work/decoded/AndroidManifest.xml || true
-
-          # Optional: change package id if provided
           if [ -n "${{ github.event.inputs.PACKAGE_ID }}" ]; then
             sed -i 's/package="\([^"]*\)"/package="${{ github.event.inputs.PACKAGE_ID }}"/' work/decoded/AndroidManifest.xml || true
           fi
-
-          # Inject our string resources overlay
           mkdir -p work/decoded/res/values
           cat > work/decoded/res/values/strings_aeronics.xml <<EOF
           <resources>
@@ -105,80 +92,58 @@ jobs:
             <string name="app_full_name">${APPNAME}</string>
           </resources>
           EOF
-
-          # Replace hard-coded brand strings inside assets (About/QML text)
           if [ -d work/decoded/assets ]; then
             grep -RIl --null -e 'QGroundControl' work/decoded/assets | xargs -0 -r sed -i "s/QGroundControl/${APPNAME}/g"
             grep -RIl --null -e 'Mission Planner' work/decoded/assets | xargs -0 -r sed -i "s/Mission Planner/${APPNAME}/g"
           fi
-
-          # Normalize any android:title attributes to use app_name
           find work/decoded/res -type f -name '*.xml' -print0 | xargs -0 -r sed -i 's/android:title="[^"]*"/android:title="@string\/app_name"/g'
 
-          echo "✔ In-app name set to: ${APPNAME}"
-
-      # ---------- BRANDING: In-app logos (FORCE) ----------
-      # Requires: branding/overrides/assets/qml/images/aeronics_logo.png  (or falls back to ICON_PATH)
-      - name: Force override all in-app logos
+      # ---------- Wide-sweep image replacement ----------
+      - name: Force override all QGC/QGround logos everywhere
         run: |
           set -e
-          SRC_DIR="$GITHUB_WORKSPACE/branding/overrides/assets/qml/images"
-          DST_DIR="work/decoded/assets/qml/images"
-          mkdir -p "$DST_DIR"
-
-          # Choose in-app logo source
+          # pick in-app logo
           INAPP="${{ github.event.inputs.INAPP_LOGO }}"
           if [ ! -f "$INAPP" ]; then
             INAPP="${{ github.event.inputs.ICON_PATH }}"
-            echo "::warning ::INAPP_LOGO not found; falling back to ICON_PATH ($INAPP)"
+            echo "::warning ::INAPP_LOGO missing, using ICON_PATH ($INAPP)"
           fi
-          test -f "$INAPP" || { echo "::error ::No logo file found (INAPP_LOGO/ICON_PATH)"; exit 1; }
+          test -f "$INAPP" || { echo "::error ::Logo file not found"; exit 1; }
 
-          # Copy all your custom images in (keeps filenames you've provided)
-          if [ -d "$SRC_DIR" ]; then
-            rsync -av --no-perms --no-owner --no-group "$SRC_DIR/" "$DST_DIR/"
-          fi
+          # canonical logo copies (for convenience)
+          mkdir -p work/logo_src
+          cp "$INAPP" work/logo_src/aeronics_logo.png
 
-          # Ensure we have a canonical aeronics_logo.png to use as source
-          cp "$INAPP" "$DST_DIR/aeronics_logo.png"
+          echo "== Candidate images BEFORE =="
+          find work/decoded -type f \( -iname '*logo*.png' -o -iname '*logo*.svg' -o -iname 'qg*.png' -o -iname 'qg*.svg' -o -iname 'qground*.png' -o -iname 'qground*.svg' -o -iname 'qgroundcontrol*.png' -o -iname 'qgroundcontrol*.svg' \) | sort | sed -n '1,400p' || true
 
-          echo "== Candidate QGC logo/image files inside APK (before) =="
-          find "$DST_DIR" -type f \( -iname '*logo*.png' -o -iname '*logo*.svg' -o -iname 'qg*.png' -o -iname 'qg*.svg' -o -iname 'qground*.png' -o -iname 'qground*.svg' \) | sort | sed -n '1,200p' || true
-
-          # Overwrite common names directly with our aeronics logo
-          for f in qground_toolbar_logo.png qgc_logo_full.png appbar_logo.png title_logo.png splash_logo.png about_logo.png qgc_splash.png; do
-            if [ -f "$DST_DIR/$f" ]; then
-              echo "Overwriting $f -> aeronics_logo.png"
-              cp "$DST_DIR/aeronics_logo.png" "$DST_DIR/$f"
-            fi
-          done
-
-          # Aggressive pass: replace any png/svg with qg*/qground*/logo* in name, preserving size
+          # Replace matches under both assets/ and res/drawable*
           while IFS= read -r file; do
             ext="${file##*.}"
             if [ "$ext" = "png" ]; then
               W=$(identify -format "%w" "$file" 2>/dev/null || echo 256)
               H=$(identify -format "%h" "$file" 2>/dev/null || echo 256)
-              echo "Reskin $file -> Aeronics ($W x $H)"
-              convert "$DST_DIR/aeronics_logo.png" -resize "${W}x${H}" "$file"
+              echo "Reskin $file -> Aeronics (${W}x${H})"
+              convert work/logo_src/aeronics_logo.png -resize "${W}x${H}" "$file"
             else
-              # SVG: replace with PNG of same base name
-              echo "Replacing SVG $file with PNG"
-              convert "$DST_DIR/aeronics_logo.png" -resize 256x256 "${file%.*}.png"
+              echo "Replace SVG $file with PNG"
+              convert work/logo_src/aeronics_logo.png -resize 256x256 "${file%.*}.png"
               rm -f "$file"
             fi
-          done < <(find "$DST_DIR" -type f \( -iname '*logo*.png' -o -iname '*logo*.svg' -o -iname 'qg*.png' -o -iname 'qg*.svg' -o -iname 'qground*.png' -o -iname 'qground*.svg' \) | sort)
+          done < <(find work/decoded -type f \( \
+             -path '*/assets/*' -o -path '*/res/drawable*/*' \) \
+             \( -iname '*logo*.png' -o -iname '*logo*.svg' -o -iname 'qg*.png' -o -iname 'qg*.svg' -o -iname 'qground*.png' -o -iname 'qground*.svg' -o -iname 'qgroundcontrol*.png' -o -iname 'qgroundcontrol*.svg' \) | sort)
 
-          # Rewrite any QML references by filename to our aeronics_logo.png
+          # Update QML references by filename
           if [ -d work/decoded/assets/qml ]; then
-            grep -RIl --null -e 'qground_.*logo\|qgc_.*logo\|appbar_logo\.png\|title_logo\.png\|splash_logo\.png\|about_logo\.png\|qgc_splash\.png' work/decoded/assets/qml \
-            | xargs -0 -r sed -i 's/[A-Za-z0-9_]*logo\.png/aeronics_logo.png/g; s/qgc_splash\.png/aeronics_logo.png/g'
+            grep -RIl --null -e 'qground_.*logo\|qgc_.*logo\|qgroundcontrol.*\.png\|qgroundcontrol.*\.svg' work/decoded/assets/qml \
+            | xargs -0 -r sed -i 's/[A-Za-z0-9_]*logo\.png/aeronics_logo.png/g'
           fi
 
-          echo "== Remaining QGC logo refs (should be empty) =="
-          grep -RIn 'qgc.*logo\|qground.*logo' work/decoded/assets/qml || true
+          # Save a report of anything still referencing QGC
+          (grep -RIn 'qgc[^"]*logo\|qground[^"]*logo\|QGroundControl' work/decoded || true) > work/Remaining_Q_refs.txt
 
-      # ---------- BUILD + SIGN ----------
+      # ---------- Build + Sign ----------
       - name: Build APK with apktool
         run: |
           set -e
@@ -194,13 +159,14 @@ jobs:
           java -jar signer.jar --apks unsigned.apk
           echo "Signed APKs found:"
           ls -lh *Signed.apk
-          # Prefer releaseSigned; fall back to debugSigned
           APK_FILE=$(ls *-releaseSigned.apk 2>/dev/null || ls *-debugSigned.apk | head -n1)
           cp "$APK_FILE" Aeronics-GCS.apk
           ls -lh Aeronics-GCS.apk
 
-      - name: Upload APK
+      - name: Upload APK + report
         uses: actions/upload-artifact@v4
         with:
           name: Aeronics-GCS
-          path: work/Aeronics-GCS.apk
+          path: |
+            work/Aeronics-GCS.apk
+            work/Remaining_Q_refs.txt
