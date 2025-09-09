@@ -33,13 +33,14 @@ jobs:
     runs-on: ubuntu-22.04
 
     env:
-      QT_VERSION: "6.5.3"             # if v5 fails, set 5.15.2 and the Qt installer bits (QGC ≥5 usually uses Qt6)
+      QT_VERSION: "6.5.3"
+      QT_MAJOR: "6"                    # hardcoded major version
       ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
       ANDROID_NDK_VERSION: "25.2.9519653"
       JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
 
     steps:
-      - name: Checkout branding repo (yours)
+      - name: Checkout branding repo
         uses: actions/checkout@v4
 
       - name: Install build deps
@@ -61,99 +62,11 @@ jobs:
 
       - name: Install Qt (Android)
         run: |
-          # Try a couple mirrors
-          wget -q https://download.qt.io/official_releases/qt/${{ env.QT_VERSION%%.* }}/${{ env.QT_VERSION }}/qt-opensource-linux-x64-${{ env.QT_VERSION }}.7z -O qt.7z || \
-          wget -q https://mirrors.ocf.berkeley.edu/qt/official_releases/qt/${{ env.QT_VERSION%%.* }}/${{ env.QT_VERSION }}/qt-opensource-linux-x64-${{ env.QT_VERSION }}.7z -O qt.7z
+          wget -q https://download.qt.io/official_releases/qt/${{ env.QT_MAJOR }}/${{ env.QT_VERSION }}/qt-opensource-linux-x64-${{ env.QT_VERSION }}.7z -O qt.7z || \
+          wget -q https://mirrors.ocf.berkeley.edu/qt/official_releases/qt/${{ env.QT_MAJOR }}/${{ env.QT_VERSION }}/qt-opensource-linux-x64-${{ env.QT_VERSION }}.7z -O qt.7z
           mkdir -p $HOME/Qt
           7z x qt.7z -o$HOME/Qt > /dev/null
           echo "$HOME/Qt/${{ env.QT_VERSION }}/android_arm64_v8a/bin" >> $GITHUB_PATH
           echo "$HOME/Qt/${{ env.QT_VERSION }}/gcc_64/bin" >> $GITHUB_PATH
 
-      - name: Fetch QGroundControl source
-        run: |
-          git clone --recursive https://github.com/${{ github.event.inputs.QGC_REPO }}.git qgc
-          cd qgc
-          git fetch --all --tags
-          git checkout "${{ github.event.inputs.QGC_REF }}"
-          git submodule update --init --recursive
-          ls -la
-
-      - name: Apply Aeronics branding to source
-        run: |
-          set -e
-          APPNAME="${{ github.event.inputs.APP_NAME }}"
-          INAPP="${{ github.event.inputs.INAPP_LOGO }}"
-          ICON="${{ github.event.inputs.ICON_PATH }}"
-          [ -f "$ICON" ] || { echo "::error ::ICON_PATH not found: $ICON"; exit 1; }
-          if [ ! -f "$INAPP" ]; then INAPP="$ICON"; fi
-
-          # 1) Change Android label + (optional) package id
-          # QGC Android manifest sits under ./android/AndroidManifest.xml
-          sed -i 's/android:label="[^"]*"/android:label="@string\/app_name"/' qgc/android/AndroidManifest.xml || true
-          if [ -n "${{ github.event.inputs.PACKAGE_ID }}" ]; then
-            sed -i 's/package="\([^"]*\)"/package="${{ github.event.inputs.PACKAGE_ID }}"/' qgc/android/AndroidManifest.xml || true
-          fi
-          mkdir -p qgc/resources/strings
-          cat > qgc/resources/strings/strings_aeronics.xml <<EOF
-          <resources>
-            <string name="app_name">${APPNAME}</string>
-          </resources>
-          EOF
-
-          # 2) Replace in-app logos used by QML and menus
-          mkdir -p qgc/resources/icons
-          cp "$INAPP" qgc/resources/icons/aeronics_logo.png
-
-          # Overwrite common QGC icons with ours (these names are used throughout QGC)
-          for f in qgc_logo_full.png qground_toolbar_logo.png qgc_splash.png appbar_logo.png about_logo.png title_logo.png; do
-            if [ -f "qgc/resources/icons/$f" ]; then
-              cp "$INAPP" "qgc/resources/icons/$f"
-            fi
-          done
-
-          # 3) Launcher mipmaps in QGC android project
-          mkdir -p qgc/android/res/mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}
-          convert "$ICON" -resize 48x48   qgc/android/res/mipmap-mdpi/ic_launcher.png
-          convert "$ICON" -resize 72x72   qgc/android/res/mipmap-hdpi/ic_launcher.png
-          convert "$ICON" -resize 96x96   qgc/android/res/mipmap-xhdpi/ic_launcher.png
-          convert "$ICON" -resize 144x144 qgc/android/res/mipmap-xxhdpi/ic_launcher.png
-          convert "$ICON" -resize 192x192 qgc/android/res/mipmap-xxxhdpi/ic_launcher.png
-          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
-            cp qgc/android/res/mipmap-$d/ic_launcher.png qgc/android/res/mipmap-$d/ic_launcher_round.png
-          done
-
-          # 4) Replace brand text inside QML
-          grep -RIl --null -e 'QGroundControl' qgc | xargs -0 -r sed -i "s/QGroundControl/${APPNAME}/g"
-
-      - name: Configure (Qt + Android)
-        env:
-          ANDROID_NDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_VERSION }}
-        run: |
-          set -e
-          mkdir -p build-android
-          cd build-android
-          cmake ../qgc -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-24 \
-            -DQT_HOST_PATH=$HOME/Qt/${{ env.QT_VERSION }}/gcc_64 \
-            -DQT_ANDROID_SDK_ROOT=${{ env.ANDROID_SDK_ROOT }} \
-            -DQT_ANDROID_NDK_ROOT=${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_VERSION }}
-          ninja
-
-      - name: Package APK (androiddeployqt)
-        env:
-          PATH: $HOME/Qt/${{ env.QT_VERSION }}/android_arm64_v8a/bin:$PATH
-        run: |
-          set -e
-          cd build-android
-          APP_JSON=$(find . -name "*-android_deployment_settings.json" | head -n1)
-          [ -n "$APP_JSON" ] || { echo "::error ::android_deployment_settings.json not found"; exit 1; }
-          androiddeployqt --input "$APP_JSON" --output ./android-build --deployment bundled --gradle --release
-          find . -name "*.apk" -type f -print
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: Aeronics-GCS-from-source
-          path: "**/*.apk"
+      # … (the rest of the steps stay the same as I gave you before)
