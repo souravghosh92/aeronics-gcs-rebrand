@@ -16,7 +16,7 @@ on:
         required: true
         default: "branding/aeronics_icon_512.png"
       PACKAGE_ID:
-        description: "(Optional) New package id (e.g., in.aeronics.gcs). Leave blank to keep original."
+        description: "(Optional) New package id, e.g. in.aeronics.gcs (keeps original if blank)"
         required: false
         default: ""
 
@@ -30,6 +30,7 @@ jobs:
 
       - name: Install tools
         run: |
+          set -e
           sudo apt-get update
           sudo apt-get install -y openjdk-17-jre-headless wget unzip rsync imagemagick
           # apktool
@@ -53,8 +54,7 @@ jobs:
           java -jar /usr/local/lib/apktool.jar d -f -o decoded base.apk
           ls -la decoded | sed -n '1,200p'
 
-      # ----------------- BRANDING -----------------
-
+      # ---------- BRANDING: Launcher icons ----------
       - name: Generate launcher mipmaps from 512x512
         run: |
           set -e
@@ -78,11 +78,42 @@ jobs:
           sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' work/decoded/AndroidManifest.xml || true
           sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' work/decoded/AndroidManifest.xml || true
 
-      # Optional: drop your in-app images here to override QML/About/Splash assets
-      # Put PNGs in repo path: branding/overrides/assets/qml/images/
-      # Example filenames you can override: about_logo.png, appbar_logo.png, qgc_logo_full.png, qgc_splash.png,
-      # qground_toolbar_logo.png, splash_logo.png, title_logo.png
-      - name: Overlay in-app images (QML assets)
+      # ---------- BRANDING: In-app images ----------
+      # Put your Aeronics logo at: branding/overrides/assets/qml/images/aeronics_logo.png
+      - name: Replace in-app Q logos (toolbar/splash/about)
+        run: |
+          set -e
+          SRC_LOGO="$GITHUB_WORKSPACE/branding/overrides/assets/qml/images/aeronics_logo.png"
+          IMG_DST="work/decoded/assets/qml/images"
+          mkdir -p "$IMG_DST"
+          if [ -f "$SRC_LOGO" ]; then
+            cp "$SRC_LOGO" "$IMG_DST/aeronics_logo.png"
+          else
+            echo "::warning ::No Aeronics in-app logo found at $SRC_LOGO (skipping image swap)"; 
+          fi
+
+          echo "== Existing logo-ish assets =="
+          find work/decoded -type f -iregex '.*\(logo\|qgc.*\|qground.*\).*\.\(png\|svg\)' | sed -n '1,200p' || true
+
+          # Overwrite common QGC/QGroundControl logo filenames if present
+          for f in qground_toolbar_logo.png qgc_logo_full.png appbar_logo.png title_logo.png splash_logo.png about_logo.png qgc_splash.png; do
+            if [ -f "$IMG_DST/$f" ] && [ -f "$IMG_DST/aeronics_logo.png" ]; then
+              echo "Overriding $f -> aeronics_logo.png"
+              cp "$IMG_DST/aeronics_logo.png" "$IMG_DST/$f"
+            fi
+          done
+
+          # Rewrite QML references to point to aeronics_logo.png
+          if [ -d work/decoded/assets/qml ]; then
+            grep -RIl --null -e 'qground_toolbar_logo.png\|qgc_logo_full.png\|appbar_logo.png\|title_logo.png\|splash_logo.png\|about_logo.png\|qgc_splash.png' work/decoded/assets/qml \
+            | xargs -0 -r sed -i 's/qground_toolbar_logo.png/aeronics_logo.png/g; s/qgc_logo_full.png/aeronics_logo.png/g; s/appbar_logo.png/aeronics_logo.png/g; s/title_logo.png/aeronics_logo.png/g; s/splash_logo.png/aeronics_logo.png/g; s/about_logo.png/aeronics_logo.png/g; s/qgc_splash.png/aeronics_logo.png/g'
+          fi
+
+          echo "== Remaining Q* logo refs (should be empty) =="
+          grep -RIn 'qgc.*logo\|qground.*logo' work/decoded/assets/qml || true
+
+      # Optional: overlay any extra images you drop in the repo
+      - name: Overlay extra QML images (optional)
         run: |
           set -e
           SRC_DIR="$GITHUB_WORKSPACE/branding/overrides/assets/qml/images"
@@ -91,10 +122,11 @@ jobs:
           if [ -d "$SRC_DIR" ]; then
             rsync -av --no-perms --no-owner --no-group "$SRC_DIR/" "$DST_DIR/"
           else
-            echo "No QML image overrides at $SRC_DIR (skipping)."
+            echo "No additional QML image overrides at $SRC_DIR (skipping)."
           fi
-          ls -la "$DST_DIR" || true
+          ls -la "$DST_DIR" | sed -n '1,200p' || true
 
+      # ---------- BRANDING: Names/strings ----------
       - name: Patch in-app name (strings + manifest + assets/QML text)
         run: |
           set -e
@@ -118,7 +150,7 @@ jobs:
           </resources>
           EOF
 
-          # Replace hard-coded brand strings inside assets (About/QML text)
+          # Replace hard-coded brand strings in assets (About/QML text)
           if [ -d work/decoded/assets ]; then
             grep -RIl --null -e 'QGroundControl' work/decoded/assets | xargs -0 -r sed -i "s/QGroundControl/${APPNAME}/g"
             grep -RIl --null -e 'Mission Planner' work/decoded/assets | xargs -0 -r sed -i "s/Mission Planner/${APPNAME}/g"
@@ -129,8 +161,7 @@ jobs:
 
           echo "✔ In-app name set to: ${APPNAME}"
 
-      # ----------------- BUILD + SIGN -----------------
-
+      # ---------- BUILD + SIGN ----------
       - name: Build APK with apktool
         run: |
           set -e
